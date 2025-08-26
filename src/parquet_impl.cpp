@@ -11,6 +11,7 @@
 #include <math.h>
 #include <list>
 #include <set>
+#include <glob.h>
 
 #include "parquet/arrow/reader.h"
 #include "parquet/arrow/schema.h"
@@ -90,6 +91,7 @@ bool enable_multifile_merge;
 
 static void find_cmp_func(FmgrInfo *finfo, Oid type1, Oid type2);
 static void destroy_parquet_state(void *arg);
+static List * lappend_glob(List *filenames, const char *filename);
 
 
 /*
@@ -468,6 +470,7 @@ parse_filenames_list(const char *str)
     char       *f = cur;
     ParserState state = PS_START;
     List       *filenames = NIL;
+    bool       wildcard_seen = false;
 
     while (*cur)
     {
@@ -483,6 +486,11 @@ parse_filenames_list(const char *str)
                         f = cur + 1;
                         state = PS_QUOTE;
                         break;
+                    case '*':
+                    case '?':
+                    case '[':
+                        wildcard_seen = true;
+                        break;
                     default:
                         /* XXX we should check that *cur is a valid path symbol
                          * but let's skip it for now */
@@ -496,8 +504,12 @@ parse_filenames_list(const char *str)
                 {
                     case ' ':
                         *cur = '\0';
-                        filenames = lappend(filenames, makeString(f));
+                        if (wildcard_seen)
+                            filenames = lappend_glob(filenames, f);
+                        else
+                            filenames = lappend(filenames, makeString(f));
                         state = PS_START;
+                        wildcard_seen = false;
                         break;
                     default:
                         break;
@@ -508,8 +520,12 @@ parse_filenames_list(const char *str)
                 {
                     case '"':
                         *cur = '\0';
-                        filenames = lappend(filenames, makeString(f));
+                        if (wildcard_seen)
+                            filenames = lappend_glob(filenames, f);
+                        else
+                            filenames = lappend(filenames, makeString(f));
                         state = PS_START;
+                        wildcard_seen = false;
                         break;
                     default:
                         break;
@@ -520,10 +536,52 @@ parse_filenames_list(const char *str)
         }
         cur++;
     }
-    filenames = lappend(filenames, makeString(f));
+    if (wildcard_seen)
+        filenames = lappend_glob(filenames, f);
+    else
+        filenames = lappend(filenames, makeString(f));
 
     return filenames;
 }
+
+
+/*
+ * lappend_glob
+ *      The filename is a globbing pathname matching potentially multiple files.
+ *      All the matched file names are added to the list.
+ */
+static List *
+lappend_glob(List *filenames,
+             const char *filename)
+{
+    glob_t  globbuf;
+
+    int error = glob(filename, GLOB_NOCHECK | GLOB_ERR, NULL, &globbuf);
+    switch (error) {
+        case 0:
+            for (size_t i = 0; i < globbuf.gl_pathc; i++)
+            {
+                filenames = lappend(filenames, makeString(globbuf.gl_pathv[i]));
+            }
+            break;
+        case GLOB_NOSPACE:
+            ereport(ERROR,
+                    (errcode(ERRCODE_OUT_OF_MEMORY),
+                    errmsg("running out of memory while globbing Parquet filename \"%s\"",
+                           filename)));
+            break;
+        case GLOB_ABORTED:
+            ereport(ERROR,
+                    (errcode(ERRCODE_IO_ERROR),
+                    errmsg("read error while globbing Parquet filename \"%s\". Check file permissions.",
+                           filename)));
+            break;
+    }
+    globfree(&globbuf);
+
+    return filenames;
+}
+
 
 /*
  * extract_rowgroups_list
