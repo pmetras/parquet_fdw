@@ -540,7 +540,7 @@ lappend_globbed_filenames(List *filenames,
     glob_t  globbuf;
 
     globbuf.gl_offs = 0;
-    int error = glob(filename, GLOB_ERR | GLOB_NOCHECK, NULL, &globbuf);
+    int error = glob(filename, GLOB_ERR | GLOB_NOCHECK | GLOB_BRACE, NULL, &globbuf);
     switch (error) {
         case 0:
             for (size_t i = globbuf.gl_offs; i < globbuf.gl_pathc; i++)
