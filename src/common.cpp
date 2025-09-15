@@ -63,10 +63,53 @@ exc_palloc(std::size_t size)
 	return ret;
 }
 
-Oid
-to_postgres_type(int arrow_type)
+
+/*
+ * Check if an Arrow user-extension type is of type UUID.
+ *
+ * CAUTION!
+ * ========
+ * UUID are not presently coded according to https://arrow.apache.org/docs/format/CanonicalExtensions.html#uuid.
+ * When it is the case, you can call this function after enabling user-extension
+ * into the reader.
+ */
+bool
+is_extension_uuid(const arrow::DataType *arrow_type)
 {
-    switch (arrow_type)
+    auto ext_type = dynamic_cast<arrow::ExtensionType *>(const_cast<arrow::DataType*>(arrow_type));
+
+    if (ext_type != NULL && ext_type->extension_name() == "arrow.uuid")
+    {
+        auto storage = ext_type->storage_type();
+
+        return storage->id() == arrow::Type::FIXED_SIZE_BINARY &&
+            static_cast<arrow::FixedSizeBinaryType*>(storage.get())->byte_width() == 16;
+    }
+    return false;
+}
+
+/*
+ * Check if the UUID is coded as a fixed-size binary.
+ *
+ * CAUTION!
+ * ========
+ * This function is presently a work around as UUID should be coded
+ * as user-extension types, according to https://arrow.apache.org/docs/format/CanonicalExtensions.html#uuid.
+ * But this is not presently the case and we assume that 16-bytes binaries
+ * are UUID.
+ * See is_extension_uuid() to correctly identify UUID.
+ */
+bool
+is_fixed_size_uuid(const arrow::DataType *arrow_type)
+{
+    return (arrow_type->name() == "fixed_size_binary" && arrow_type->byte_width() == 16);
+}
+
+
+Oid
+to_postgres_type(const arrow::DataType *arrow_type)
+{
+    switch (arrow_type->id())
     {
         case arrow::Type::BOOL:
             return BOOLOID;
@@ -89,6 +132,16 @@ to_postgres_type(int arrow_type)
             return TIMESTAMPOID;
         case arrow::Type::DATE32:
             return DATEOID;
+        // UUID should be user-extension types, but that's not the case presently...
+        // If the size is 16 bytes, we consider it is a UUID.
+        case arrow::Type::FIXED_SIZE_BINARY:
+            if (is_fixed_size_uuid(arrow_type))
+                return UUIDOID;
+            return BYTEAOID;
+        case arrow::Type::EXTENSION:
+            if (is_extension_uuid(arrow_type))
+                return UUIDOID;
+            return InvalidOid;
         default:
             return InvalidOid;
     }
@@ -158,13 +211,13 @@ tolowercase(const char *input, char *output)
     return output;
 }
 
-arrow::Type::type
+arrow::DataType *
 get_arrow_list_elem_type(arrow::DataType *type)
 {
     auto children = type->fields();
 
     Assert(children.size() == 1);
-    return children[0]->type()->id();
+    return children[0]->type().get();
 }
 
 void datum_to_jsonb(Datum value, Oid typoid, bool isnull, FmgrInfo *outfunc,

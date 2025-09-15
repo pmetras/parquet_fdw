@@ -269,8 +269,8 @@ void ParquetReader::create_column_mapping(TupleDesc tupleDesc, const std::set<in
                         Assert(strct.children.size() == 2);
                         auto &key = strct.children[0];
                         auto &item = strct.children[1];
-                        Oid pg_key_type = to_postgres_type(key.field->type()->id());
-                        Oid pg_item_type = to_postgres_type(item.field->type()->id());
+                        Oid pg_key_type = to_postgres_type(key.field->type().get());
+                        Oid pg_item_type = to_postgres_type(item.field->type().get());
 
                         typinfo.children.emplace_back(key.field->type(),
                                                       pg_key_type);
@@ -455,16 +455,53 @@ Datum ParquetReader::read_primitive_type(arrow::Array *array,
             int32 d = tsarray->Value(i);
 
             /*
-             * Postgres date starts with 2000-01-01 while unix date (which
-             * Parquet is using) starts with 1970-01-01. So we need to do
-             * simple calculations here.
-             */
+            * Postgres date starts with 2000-01-01 while unix date (which
+            * Parquet is using) starts with 1970-01-01. So we need to do
+            * simple calculations here.
+            */
             res = DateADTGetDatum(d + (UNIX_EPOCH_JDATE - POSTGRES_EPOCH_JDATE));
             break;
         }
+        case arrow::Type::FIXED_SIZE_BINARY:
+        {
+            arrow::FixedSizeBinaryArray *binarray = (arrow::FixedSizeBinaryArray *) array;
+
+            const int32_t vallen = binarray->byte_width();
+            const uint8_t *value = binarray->GetValue(0);
+
+            /* Build bytea */
+            int64 bytea_len = vallen + VARHDRSZ;
+            bytea *b = (bytea *) this->allocator->fast_alloc(bytea_len);
+            SET_VARSIZE(b, bytea_len);
+            memcpy(VARDATA(b), value, vallen);
+
+            res = PointerGetDatum(b);
+            break;
+        }
+        case arrow::Type::EXTENSION:
+        {
+            if (is_extension_uuid(typinfo.arrow.type))
+            {
+                arrow::BinaryArray *binarray = (arrow::BinaryArray *) array;
+
+                int32_t vallen = 0;
+                const char *value = reinterpret_cast<const char*>(binarray->GetValue(i, &vallen));
+
+                /* Build bytea */
+                int64 bytea_len = vallen + VARHDRSZ;
+                bytea *b = (bytea *) this->allocator->fast_alloc(bytea_len);
+                SET_VARSIZE(b, bytea_len);
+                memcpy(VARDATA(b), value, vallen);
+
+                res = PointerGetDatum(b);
+                break;
+            }
+        throw Error("unsupported user-extension column type: %s",
+                    typinfo.arrow.type_name.c_str());
+        }
         /* TODO: add other types */
         default:
-            throw Error("parquet_fdw: unsupported column type: %s",
+            throw Error("unsupported column type: %s",
                         typinfo.arrow.type_name.c_str());
     }
 
@@ -620,7 +657,7 @@ ParquetReader::map_to_datum(arrow::MapArray *maparray, int pos,
 void ParquetReader::initialize_cast(TypeInfo &typinfo, const char *attname)
 {
     MemoryContext ccxt = CurrentMemoryContext;
-    Oid         src_oid = to_postgres_type(typinfo.arrow.type_id);
+    Oid         src_oid = to_postgres_type(typinfo.arrow.type);
     Oid         dst_oid = typinfo.pg.oid;
     bool        error = false;
     char        errstr[ERROR_STR_LEN];

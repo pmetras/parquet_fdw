@@ -44,26 +44,29 @@ options (
 );
 ```
 
-You can use [globbing](https://en.wikipedia.org/wiki/Glob_(programming)) to list all the Parquet files, like `options (filename '/mnt/userdata*.parquet')` and it will import all matching files. This can be usefull when you have a Hive directory structure, for instance organized by `year/month/day` and you can consider all Parquet files with `/mnt/userdata/**/*.parquet`. You can also use name enumerations using braces like `/mnt/userdata/data_{1,3}.parquet` that will consider only files `data_1.parquet` and `data_3.parquet`.
+You can use [globbing](https://en.wikipedia.org/wiki/Glob_(programming)) to list all the Parquet files, like `options (filename '/mnt/userdata*.parquet')` and it will import all matching files. This can be usefull when you have a Hive directory structure, for instance organized by `year/month/day` and you can consider all Parquet files with `/mnt/userdata/*/*/*.parquet`. You can also use named enumerations using braces like `/mnt/userdata/data_{1,3}.parquet` that will consider only files `data_1.parquet` and `data_3.parquet`.
 
 ## Advanced
 
 Currently `parquet_fdw` supports the following column [types](https://github.com/apache/arrow/blob/master/cpp/src/arrow/type.h):
 
-|   Arrow type |  SQL type |
-|-------------:|----------:|
-|         INT8 |      INT2 |
-|        INT16 |      INT2 |
-|        INT32 |      INT4 |
-|        INT64 |      INT8 |
-|        FLOAT |    FLOAT4 |
-|       DOUBLE |    FLOAT8 |
-|    TIMESTAMP | TIMESTAMP |
-|       DATE32 |      DATE |
-|       STRING |      TEXT |
-|       BINARY |     BYTEA |
-|         LIST |     ARRAY |
-|          MAP |     JSONB |
+|         Arrow type |                         SQL type |
+|-------------------:|---------------------------------:|
+|               INT8 |                             INT2 |
+|              INT16 |                             INT2 |
+|              INT32 |                             INT4 |
+|              INT64 |                             INT8 |
+|              FLOAT |                           FLOAT4 |
+|             DOUBLE |                           FLOAT8 |
+|          TIMESTAMP |                        TIMESTAMP |
+|             DATE32 |                             DATE |
+|             STRING |                             TEXT |
+|             BINARY |                            BYTEA |
+|               LIST |                            ARRAY |
+|                MAP |                            JSONB |
+|               UUID |                             UUID |
+| FIXED_SIZED_BINARY | UUID when length 16, else BINARY |
+|             BINARY |                           BINARY |
 
 Currently `parquet_fdw` doesn't support structs and nested lists.
 
@@ -106,6 +109,25 @@ into public;
 ```
 
 It is important that `remote_schema` here is a path to a local filesystem directory and is double quoted.
+
+#### Finding Parquet files from `tables_map` option
+
+Foreign schema import also support specifying a mapping between tables and filenames with the `tables_map` option. Its value is a space-separated list of `key=value` values with table names as keys and Parquet files paths as values. Like for `filename`, file globbing can be used, and like with Linux PATH variable, the colon `:` is used to separate multiple paths within a value.
+
+```sql
+import foreign schema "/path/to/directory"
+from server parquet_srv
+into public options (tables_map 'table1=/path/to/directory/2022/*/*.parquet:/path/to/directory/2023/*/*.parquet table2=/path/to/directory{2024,2025}/*/*.parquet')
+;
+```
+
+As a security, the extension checks that the paths in the `tables_map` are within the external schema path, preventing accessing files elsewhere on the server. Also, if foreign schema `limit to` or `except` clauses are used specifiying table names, only these names will be considered in the `tables_map`.
+
+Tables created through the `tables_map` options are identical as if they were created with a `create foreign table` command with a `filename` option. All other options from the `import foreign schema` are transmitted to the `create foreign table`.
+
+Each table must have at least one Parquet file when created, to query Parquet field and map them to colomun names. Of course, files globbing is evaluated at query-time, so one can add files to a directory and have them considered in the query results.
+
+#### Finding Parquet files from `import_parquet` function
 
 Another way to import parquet files into foreign tables is to use `import_parquet` or `import_parquet_explicit`:
 

@@ -122,8 +122,9 @@ protected:
     {
         struct
         {
-            arrow::Type::type   type_id;
-            std::string         type_name;
+            arrow::DataType        *type;
+            arrow::Type::type       type_id;
+            std::string             type_name;
         } arrow;
 
         struct
@@ -135,7 +136,7 @@ protected:
         } pg;
 
         /*
-         * Cast functions from dafult postgres type defined in `to_postgres_type`
+         * Cast functions from default postgres type defined in `to_postgres_type`
          * to actual table column type.
          */
         bool            need_cast;
@@ -167,6 +168,7 @@ protected:
         TypeInfo(std::shared_ptr<arrow::DataType> arrow_type, Oid typid=InvalidOid)
             : TypeInfo()
         {
+            arrow.type = arrow_type.get();
             arrow.type_id = arrow_type->id();
             arrow.type_name = arrow_type->name();
             pg.oid = typid;

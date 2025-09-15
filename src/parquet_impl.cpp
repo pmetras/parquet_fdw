@@ -371,13 +371,13 @@ row_group_matches_filter(parquet::Statistics *stats,
 
         /* Do conversion */
         filter->value = convert_const(filter->value,
-                                      to_postgres_type(arrow_type->id()));
+                                      to_postgres_type(arrow_type));
     }
     val = filter->value->constvalue;
 
     find_cmp_func(&finfo,
                   filter->value->consttype,
-                  to_postgres_type(arrow_type->id()));
+                  to_postgres_type(arrow_type));
 
     switch (filter->strategy)
     {
@@ -456,7 +456,11 @@ typedef enum
 {
     PS_START = 0,
     PS_IDENT,
-    PS_QUOTE
+    PS_QUOTE,
+    PS_KEY,
+    PS_VALUE,
+    PS_QKEY,
+    PS_QVALUE
 } ParserState;
 
 /*
@@ -577,6 +581,142 @@ lappend_globbed_filenames(List *filenames,
     globfree(&globbuf);
 
     return filenames;
+}
+
+
+typedef struct TableMapping {
+    char    *tablename;
+    char    *filenames;
+} TableMapping;
+
+/*
+ * parse_tables_map
+ *      Parse space separated list of tablename=filename[:filename*].
+ *      Filename can be globbed path, but it is not resolved in that function.
+ *      The colon-separated list of filenames is replaced by a space-separated
+ *      list that can be used in the CREATE TABLE statement.
+ */
+static List *
+parse_tables_map(const char *str)
+{
+    char       *cur = pstrdup(str);
+    char       *f = cur;
+    ParserState state = PS_START;
+    char       *tablename = NULL;
+    char       *filenames = NULL;
+    TableMapping *tf = NULL;
+    List       *tables = NIL;
+
+    while (*cur)
+    {
+        switch (state)
+        {
+            case PS_START:
+                switch (*cur)
+                {
+                    case ' ':
+                        /* just skip */
+                        break;
+                    case '"':
+                        f = cur + 1;
+                        state = PS_QKEY;
+                        break;
+                    case '=':
+                        elog(ERROR, "parquet_fdw: missing table name in tables_map");
+                        return tables;    
+                    default:
+                        /* XXX we should check that *cur is a valid path symbol
+                         * but let's skip it for now */
+                        state = PS_KEY;
+                        f = cur;
+                        break;
+                }
+                break;
+            case PS_KEY:
+                switch (*cur)
+                {
+                    case '=':
+                        *cur = '\0';
+                        tablename = pstrdup(f);
+                        f = cur + 1;
+                        state = PS_VALUE;
+                        break;
+                    case ' ':
+                        elog(ERROR, "parquet_fdw: missing file name in tables_map");
+                        return tables;
+                    default:
+                        break;
+                }
+                break;
+            case PS_VALUE:
+                switch (*cur)
+                {
+                    case ':':
+                        // ':' file path separator in tables_map is replaced by ' ' separator
+                        // in filename option.
+                        *cur = ' ';
+                        break;
+                    case '"':
+                        // We do nothing when we encounter a double-quote as the value
+                        // must be transmitted as-is to the CREATE FOREIGN TABLE statement.
+                        // We just need to get the other double-quote.
+                        state = PS_QVALUE;
+                        break;
+                    case ' ':
+                        *cur = '\0';
+                        filenames = pstrdup(f);
+                        Assert(tablename && filenames);
+                        tf = (TableMapping *) palloc(sizeof(TableMapping));
+                        tf->tablename = tablename;
+                        tf->filenames = filenames;
+                        tables = lappend(tables, tf);
+                        f = cur + 1;
+                        state = PS_START;
+                        tablename = NULL;
+                        filenames = NULL;
+                        break;
+                    default:
+                        break;
+                }
+                break;
+            case PS_QKEY:
+                switch (*cur)
+                {
+                    case '"':
+                        *cur = '\0';
+                        tablename = pstrdup(f);
+                        f = cur + 1;
+                        state = PS_VALUE;
+                        break;
+                    default:
+                        break;
+                }
+                break;
+            case PS_QVALUE:
+                switch (*cur)
+                {
+                    case '"':
+                        // Back to normal value processing
+                        state = PS_VALUE;
+                        break;
+                    default:
+                        break;
+                }
+                break;
+            default:
+                elog(ERROR, "parquet_fdw: unknown parse state");
+        }
+        cur++;
+    }
+    filenames = pstrdup(f);
+    if (!tablename || !filenames)
+        elog(ERROR, "parquet_fdw: tables_mapping option can't be empty");
+    tf = (TableMapping *) palloc(sizeof(TableMapping));
+    tf->tablename = tablename;
+    tf->filenames = filenames;
+    tables = lappend(tables, tf);
+
+    return tables;
 }
 
 
@@ -793,15 +933,15 @@ extract_parquet_fields(const char *path) noexcept
             {
                 case arrow::Type::LIST:
                 {
-                    arrow::Type::type subtype_id;
+                    arrow::DataType *subtype;
                     Oid     pg_subtype;
                     bool    error = false;
 
                     if (type->num_fields() != 1)
                         throw Error("lists of structs are not supported ('%s')", path);
 
-                    subtype_id = get_arrow_list_elem_type(type.get());
-                    pg_subtype = to_postgres_type(subtype_id);
+                    subtype = get_arrow_list_elem_type(type.get());
+                    pg_subtype = to_postgres_type(subtype);
 
                     /* This sucks I know... */
                     PG_TRY();
@@ -823,7 +963,7 @@ extract_parquet_fields(const char *path) noexcept
                     pg_type = JSONBOID;
                     break;
                 default:
-                    pg_type = to_postgres_type(type->id());
+                    pg_type = to_postgres_type(type.get());
             }
 
             if (pg_type != InvalidOid)
@@ -915,7 +1055,9 @@ create_foreign_table_query(const char *tablename,
     {
         DefElem *def = (DefElem *) lfirst(lc);
 
-        appendStringInfo(&str, ", %s '%s'", def->defname, defGetString(def));
+        // Don't pass files_map option to tables as it is converted to filename option.
+        if (strcmp("tables_map", def->defname) != 0)
+            appendStringInfo(&str, ", %s '%s'", def->defname, defGetString(def));
     }
 
     appendStringInfo(&str, ")");
@@ -947,7 +1089,7 @@ parse_attributes_list(char *start, Oid relid)
     while ((token = strtok(start, delim)) != NULL)
     {
         if ((attnum = get_attnum(relid, token)) == InvalidAttrNumber)
-            elog(ERROR, "paruqet_fdw: invalid attribute name '%s'", token);
+            elog(ERROR, "parquet_fdw: invalid attribute name '%s'", token);
         attrs = lappend_int(attrs, attnum);
         start = NULL;
     }
@@ -1056,6 +1198,9 @@ get_table_options(Oid relid, ParquetFdwPlanState *fdw_private)
     fdw_private->files_in_order = false;
     table = GetForeignTable(relid);
 
+    // When we get there, we are sure that only one of filename, tables_map or
+    // files_func option has been defined. All these options set the
+    // fdw_private->filenames value.
     foreach(lc, table->options)
     {
 		DefElem    *def = (DefElem *) lfirst(lc);
@@ -1063,6 +1208,24 @@ get_table_options(Oid relid, ParquetFdwPlanState *fdw_private)
         if (strcmp(def->defname, "filename") == 0)
         {
             fdw_private->filenames = parse_filenames_list(defGetString(def));
+        }
+        else if (strcmp(def->defname, "tables_map") == 0)
+        {
+            ListCell   *table;
+            List       *tables_map = parse_tables_map(defGetString(def));
+            char       *tablename = get_rel_name(relid);
+
+            foreach(table, tables_map)
+            {
+                if (strcmp(tablename, ((TableMapping *) lfirst(table))->tablename) == 0)
+                {
+                    fdw_private -> filenames = parse_filenames_list(((TableMapping *) lfirst(table))->filenames);
+                    break;
+                }
+            }
+            // As the tables_map option is replaced by a filename one, we
+            // don't need it anymore.
+            list_free(tables_map);
         }
         else if (strcmp(def->defname, "files_func") == 0)
         {
@@ -2041,89 +2204,198 @@ parquetShutdownForeignScan(ForeignScanState * /* node */)
 {
 }
 
+
+/*
+ * Add a CREATE FOREIGN TABLE statement command for the given table name
+ * to the list of tables creation for the foreign schema.
+ */
+static List *
+add_create_foreign_table(List *cmds, ImportForeignSchemaStmt *stmt, char *tablename, char *filenames)
+{
+    ListCell   *lc;
+    List       *fields;
+    List       *paths = NULL;
+    char       *path = NULL;
+    char       *query;
+    bool       found = false; // Is the table in the stmt->table_list
+
+    // Check that table name is allowed or not by the LIMIT TO or EXCEPT
+    // clauses of the IMPORT FOREIGN SCHEMA command.
+    foreach (lc, stmt->table_list)
+    {
+        RangeVar *rv = (RangeVar *) lfirst(lc);
+
+        if (strcmp(tablename, rv->relname) == 0)
+        {
+            if (stmt->list_type == FDW_IMPORT_SCHEMA_EXCEPT)
+            {
+                elog(DEBUG1, "parquet_fdw: relation '%s' is listed in IMPORT FOREIGN SCHEMA EXCEPT clause; not creating it", tablename);
+                return cmds;
+            }
+            found = true;
+        }
+    }
+    if (stmt->list_type == FDW_IMPORT_SCHEMA_LIMIT_TO && !found)
+    {
+        elog(DEBUG1, "parquet_fdw: relation '%s' is not listed into the IMPORT FOREIGN SCHEMA LIMIT TO clause; not creating it", tablename);
+        return cmds;
+    }
+
+    // Create list of paths
+    paths = parse_filenames_list(filenames);
+
+    // Security: Check that all files are within the remote schema path.
+    // We don't check yet that the files exist: this will be done
+    // when querying the table.
+    size_t len = strlen(stmt->remote_schema);
+    foreach(lc, paths)
+    {
+        path = strVal(lfirst(lc));
+
+        if (strlen(path) <= len || strncmp(stmt->remote_schema, path, len) != 0)
+            elog(ERROR,
+                "parquet_fdw: file %s is outside remote schema path %s", path, stmt->remote_schema);
+    }
+
+    path = strVal(linitial(paths));
+    fields = extract_parquet_fields(path);
+
+    if (fields == NIL)
+        elog(ERROR, "parquet_fdw: one Parquet file at least must be present into %s to extract columns of remote table", path);
+    
+    // We should check that fields in all Parquet files are identical.
+    // Following code is unreliable...
+/*
+    for_each_from(lc, paths, 1)
+    {
+        List *fields2 = extract_parquet_fields(strVal(lfirst(lc)));
+
+        ListCell *fc = (ListCell *) linitial(fields);
+        ListCell *fc2 = (ListCell *) linitial(fields2);
+        FieldInfo *fi = (FieldInfo *) fc;
+        FieldInfo *fi2 = (FieldInfo *) fc2;
+        while (fc != NULL && fc2 != NULL)
+        {
+            if (fi->oid != fi2->oid || strcmp(fi->name, fi2->name) != 0)
+                elog(ERROR,
+                    "parquet_fdw: fields of file %s are different from those of other files (%s vs %s)",
+                    strVal(lfirst(lc)), fi->name, fi2->name);
+
+            fc = lnext(fields, fc);
+            fc2 = lnext(fields2, fc2);
+            fi = (FieldInfo *) fc;
+            fi2 = (FieldInfo *) fc2;
+        }
+        if (fc != NULL || fc2 != NULL)
+            elog(ERROR,
+                "parquet_fdw: fields of file %s are different from those of other files (%s vs %s)",
+                strVal(lfirst(lc)),
+                fc != NULL ? fi->name : "NULL",
+                fc2 != NULL ? fi2->name: "NULL");
+        pfree(fields2);
+    }
+*/
+
+    // We can now create the CREATE FOREIGN TABLE query...
+    query = create_foreign_table_query(tablename, stmt->local_schema,
+                                        stmt->server_name, &filenames, 1,
+                                        fields, stmt->options);
+
+    pfree(fields);
+    
+    return lappend(cmds, query);
+}
+
+
 extern "C" List *
 parquetImportForeignSchema(ImportForeignSchemaStmt *stmt, Oid /* serverOid */)
 {
     struct dirent  *f;
     DIR            *d;
     List           *cmds = NIL;
+    List           *tables = NIL;
+    ListCell       *lc;
 
-    d = AllocateDir(stmt->remote_schema);
-    if (!d)
+    // Get options to find tables_map and table names.
+    foreach(lc, stmt->options)
     {
-        int e = errno;
+        DefElem *def = (DefElem *) lfirst(lc);
 
-        elog(ERROR, "parquet_fdw: failed to open directory '%s': %s",
-             stmt->remote_schema,
-             strerror(e));
+        if (strcmp(def->defname, "tables_map") == 0)
+        {
+            tables = parse_tables_map(defGetString(def));
+            break;
+        }
     }
 
-    while ((f = readdir(d)) != NULL)
+    if (tables == NIL)
     {
-
-        /* TODO: use lstat if d_type == DT_UNKNOWN */
-        if (f->d_type == DT_REG)
+        // We create a table for each file into the foreign schema
+        // definition
+        d = AllocateDir(stmt->remote_schema);
+        if (!d)
         {
-            ListCell   *lc;
-            bool        skip = false;
-            List       *fields;
-            char       *filename = pstrdup(f->d_name);
-            char       *path;
-            char       *query;
+            int e = errno;
 
-            path = psprintf("%s/%s", stmt->remote_schema, filename);
-
-            /* check that file extension is "parquet" */
-            char *ext = strrchr(filename, '.');
-
-            if (ext && strcmp(ext + 1, "parquet") != 0)
-                continue;
-
-            /*
-             * Set terminal symbol to be able to run strcmp on filename
-             * without file extension
-             */
-            *ext = '\0';
-
-            foreach (lc, stmt->table_list)
-            {
-                RangeVar *rv = (RangeVar *) lfirst(lc);
-
-                switch (stmt->list_type)
-                {
-                    case FDW_IMPORT_SCHEMA_LIMIT_TO:
-                        if (strcmp(filename, rv->relname) != 0)
-                        {
-                            skip = true;
-                            break;
-                        }
-                        break;
-                    case FDW_IMPORT_SCHEMA_EXCEPT:
-                        if (strcmp(filename, rv->relname) == 0)
-                        {
-                            skip = true;
-                            break;
-                        }
-                        break;
-                    default:
-                        ;
-                }
-            }
-            if (skip)
-                continue;
-
-            fields = extract_parquet_fields(path);
-            query = create_foreign_table_query(filename, stmt->local_schema,
-                                               stmt->server_name, &path, 1,
-                                               fields, stmt->options);
-            cmds = lappend(cmds, query);
+            elog(ERROR, "parquet_fdw: failed to open directory '%s': %s",
+                stmt->remote_schema,
+                strerror(e));
         }
 
+        while ((f = readdir(d)) != NULL)
+        {
+            /* TODO: use lstat if d_type == DT_UNKNOWN */
+            if (f->d_type == DT_REG)
+            {
+                char    *filename = pstrdup(f->d_name);
+                char    *path = psprintf("%s/%s", stmt->remote_schema, filename);
+
+                /* check that file extension is "parquet" */
+                char *ext = strrchr(filename, '.');
+
+                if (ext && strcmp(ext + 1, "parquet") != 0)
+                {
+                    elog(WARNING,
+                        "parquet_fdw: non-Parquet file %s in directory %s; not considering it",
+                        filename, stmt->remote_schema);
+                    continue;
+                }
+
+                /*
+                * Set terminal symbol so that tablename is taken from filename
+                * without file extension.
+                */
+                *ext = '\0';
+                
+                cmds = add_create_foreign_table(cmds, stmt, filename, path);
+
+                pfree(filename);
+                pfree(path);
+            }
+
+        }
+        FreeDir(d);
     }
-    FreeDir(d);
+    else
+    {
+        // The tables to create are given by the tables_map option
+        foreach(lc, tables)
+        {
+            char *tablename = ((TableMapping *) lfirst(lc))->tablename;
+            char *filenames = ((TableMapping *) lfirst(lc))->filenames;
+
+            // We must transmit the filenames as-is to the CREATE FOREIGN TABLE
+            // so that globbing patterns are evaluated at query execution and
+            // not when the table is created.
+
+            cmds = add_create_foreign_table(cmds, stmt, tablename, filenames);
+        }
+    }
+    list_free(tables);
 
     return cmds;
 }
+
 
 extern "C" Datum
 parquet_fdw_validator_impl(PG_FUNCTION_ARGS)
@@ -2161,11 +2433,70 @@ parquet_fdw_validator_impl(PG_FUNCTION_ARGS)
 
                     ereport(ERROR,
                             (errcode(ERRCODE_FDW_INVALID_OPTION_NAME),
-                             errmsg("parquet_fdw: %s ('%s')", strerror(e), fn)));
+                             errmsg("parquet_fdw: filename: %s ('%s')", strerror(e), fn)));
                 }
             }
-            pfree(filenames);
             pfree(filename);
+            pfree(filenames);
+            filename_provided = true;
+        }
+        else if (strcmp(def->defname, "tables_map") == 0)
+        {
+            char   *tables_map = pstrdup(defGetString(def));
+            List   *tables;
+            ListCell *table_lc;
+
+            tables = parse_tables_map(tables_map);
+
+            int i = 0;
+            for_each_from(table_lc, tables, i)
+            {
+                // Check that tables are not defined multiple times in the tables_map
+                char   *tablename = ((TableMapping *) lfirst(table_lc))->tablename;
+                ListCell *table2_lc;
+
+                int j = i + 1;
+                for_each_from(table2_lc, tables, j)
+                {
+                    char *tablename2 = ((TableMapping *) lfirst(table2_lc))->tablename;
+                    elog(DEBUG1, "parquet_fdw: comparing '%s' with '%s' in tables_map", tablename, tablename2);
+                    if (strcmp(tablename, tablename2) == 0)
+                        elog(ERROR,
+                            "parquet_fdw: table name '%s' is not unique in tables_map option", tablename);
+                }
+
+                // Check that paths are valid
+                char   *filename = ((TableMapping *) lfirst(table_lc))->filenames;
+                List   *filenames;
+                ListCell *file_lc;
+
+                filenames = parse_filenames_list(filename);
+
+                foreach(file_lc, filenames)
+                {
+                    struct stat stat_buf;
+                    char       *fn = strVal(lfirst(file_lc));
+                    elog(DEBUG1, "parquet_fdw: checking existence of file '%s' for table '%s' in tables_map", fn, tablename);
+                    if (stat(fn, &stat_buf) != 0)
+                    {
+                        int e = errno;
+
+                        ereport(ERROR,
+                                (errcode(ERRCODE_FDW_INVALID_OPTION_NAME),
+                                errmsg("parquet_fdw: %s ('%s') in tables_map option for table '%s", strerror(e), fn, tablename)));
+                    }
+                }
+                pfree(tablename);
+                pfree(filename);
+                list_free(filenames);
+                i += 1;
+            }
+            list_free(tables);
+            pfree(tables_map);
+
+            // As a tables_map option is translated to a filename option, we now remove
+            // the tables_map from the options.
+            options_list = foreach_delete_current(options_list, opt_lc);
             filename_provided = true;
         }
         else if (strcmp(def->defname, "files_func") == 0)
@@ -2231,7 +2562,7 @@ parquet_fdw_validator_impl(PG_FUNCTION_ARGS)
     }
 
     if (!filename_provided && !func_provided)
-        elog(ERROR, "parquet_fdw: filename or function is required");
+        elog(ERROR, "parquet_fdw: filename or files_func option is required");
 
     PG_RETURN_VOID();
 }
