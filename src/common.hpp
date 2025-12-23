@@ -58,6 +58,7 @@ struct Error : std::exception
 
 void *exc_palloc(std::size_t size);
 bool is_extension_uuid(const arrow::DataType *arrow_type);
+bool is_fixed_size_uuid(const arrow::DataType *arrow_type);
 Oid to_postgres_type(const arrow::DataType *arrow_type);
 Datum bytes_to_postgres_type(const char *bytes, Size len, const arrow::DataType *arrow_type);
 char *tolowercase(const char *input, char *output);

@@ -15,6 +15,7 @@ extern "C"
 #include "parser/parse_coerce.h"
 #include "utils/array.h"
 #include "utils/builtins.h"
+#include "utils/uuid.h"
 #include "utils/date.h"
 #include "utils/lsyscache.h"
 #include "utils/memutils.h"
@@ -464,28 +465,30 @@ Datum ParquetReader::read_primitive_type(arrow::Array *array,
         }
         case arrow::Type::FIXED_SIZE_BINARY:
         {
-            arrow::FixedSizeBinaryArray *binarray = (arrow::FixedSizeBinaryArray *) array;
-
-            const int32_t vallen = binarray->byte_width();
-            const uint8_t *value = binarray->GetValue(0);
-
-            /* Build bytea */
-            int64 bytea_len = vallen + VARHDRSZ;
-            bytea *b = (bytea *) this->allocator->fast_alloc(bytea_len);
-            SET_VARSIZE(b, bytea_len);
-            memcpy(VARDATA(b), value, vallen);
-
-            res = PointerGetDatum(b);
-            break;
-        }
-        case arrow::Type::EXTENSION:
-        {
-            if (is_extension_uuid(typinfo.arrow.type))
+            arrow::FixedSizeBinaryArray *binarray = dynamic_cast<arrow::FixedSizeBinaryArray*>(array);
+            if (!binarray)
             {
-                arrow::BinaryArray *binarray = (arrow::BinaryArray *) array;
+                elog(ERROR, "parquet_fdw: Expected FixedSizeBinaryArray but got %s", array->type()->ToString().c_str());
+            }
 
-                int32_t vallen = 0;
-                const char *value = reinterpret_cast<const char*>(binarray->GetValue(i, &vallen));
+            // TODO, FIXME: A 16 bytes array is considered a UUID
+            if (is_fixed_size_uuid(typinfo.arrow.type.get()))
+            {
+                const uint8_t *value = binarray->GetValue(i);
+
+                elog(DEBUG1, "parquet_fdw: Reading UUID from FIXED_SIZE_BINARY: %02x%02x%02x%02x-%02x%02x-%02x%02x-%02x%02x-%02x%02x%02x%02x%02x%02x",
+                    value[0], value[1], value[2], value[3], value[4], value[5], value[6], value[7],
+                    value[8], value[9], value[10], value[11], value[12], value[13], value[14], value[15]
+                );
+                pg_uuid_t *uuid_val = (pg_uuid_t*) this->allocator->fast_alloc(sizeof(pg_uuid_t));
+                memcpy(uuid_val->data, value, UUID_LEN);
+                res = UUIDPGetDatum(uuid_val);  // convert pointer to Datum
+            }
+            else
+            {
+                elog(DEBUG1, "parquet_fdw: Reading actual FIXED_SIZE_BINARY");
+                const int32_t vallen = binarray->byte_width();
+                const uint8_t *value = binarray->GetValue(i);
 
                 /* Build bytea */
                 int64 bytea_len = vallen + VARHDRSZ;
@@ -494,8 +497,37 @@ Datum ParquetReader::read_primitive_type(arrow::Array *array,
                 memcpy(VARDATA(b), value, vallen);
 
                 res = PointerGetDatum(b);
-                break;
             }
+            break;
+        }
+        case arrow::Type::EXTENSION:
+        {
+            arrow::BinaryArray *binarray = (arrow::BinaryArray *) array;
+
+            int32_t vallen = 0;
+            const char *value = reinterpret_cast<const char*>(binarray->GetValue(i, &vallen));
+
+            if (is_extension_uuid(typinfo.arrow.type.get()))
+            {
+                elog(DEBUG1, "parquet_fdw: Reading UUID from EXTENSION: %02x%02x%02x%02x-%02x%02x-%02x%02x-%02x%02x-%02x%02x%02x%02x%02x%02x",
+                    value[0], value[1], value[2], value[3], value[4], value[5], value[6], value[7],
+                    value[8], value[9], value[10], value[11], value[12], value[13], value[14], value[15]
+                );
+                pg_uuid_t *uuid_val = (pg_uuid_t*) this->allocator->fast_alloc(sizeof(pg_uuid_t));
+                memcpy(uuid_val->data, value, UUID_LEN);
+                res = UUIDPGetDatum(uuid_val);  // convert pointer to Datum
+            }
+            else
+            {
+                /* Build bytea */
+                int64 bytea_len = vallen + VARHDRSZ;
+                bytea *b = (bytea *) this->allocator->fast_alloc(bytea_len);
+                SET_VARSIZE(b, bytea_len);
+                memcpy(VARDATA(b), value, vallen);
+
+                res = PointerGetDatum(b);
+            }
+            break;
         throw Error("unsupported user-extension column type: %s",
                     typinfo.arrow.type_name.c_str());
         }
@@ -657,7 +689,7 @@ ParquetReader::map_to_datum(arrow::MapArray *maparray, int pos,
 void ParquetReader::initialize_cast(TypeInfo &typinfo, const char *attname)
 {
     MemoryContext ccxt = CurrentMemoryContext;
-    Oid         src_oid = to_postgres_type(typinfo.arrow.type);
+    Oid         src_oid = to_postgres_type(typinfo.arrow.type.get());
     Oid         dst_oid = typinfo.pg.oid;
     bool        error = false;
     char        errstr[ERROR_STR_LEN];
