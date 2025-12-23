@@ -6,6 +6,7 @@ extern "C"
 #include "fmgr.h"
 #include "catalog/pg_type.h"
 #include "utils/builtins.h"
+#include "utils/uuid.h"
 #include "utils/date.h"
 #include "utils/memutils.h"
 #include "utils/memdebug.h"
@@ -83,7 +84,7 @@ is_extension_uuid(const arrow::DataType *arrow_type)
         auto storage = ext_type->storage_type();
 
         return storage->id() == arrow::Type::FIXED_SIZE_BINARY &&
-            static_cast<arrow::FixedSizeBinaryType*>(storage.get())->byte_width() == 16;
+            static_cast<arrow::FixedSizeBinaryType*>(storage.get())->byte_width() == UUID_LEN;
     }
     return false;
 }
@@ -102,7 +103,7 @@ is_extension_uuid(const arrow::DataType *arrow_type)
 bool
 is_fixed_size_uuid(const arrow::DataType *arrow_type)
 {
-    return (arrow_type->name() == "fixed_size_binary" && arrow_type->byte_width() == 16);
+    return (arrow_type != NULL && arrow_type->name() == "fixed_size_binary" && arrow_type->byte_width() == UUID_LEN);
 }
 
 

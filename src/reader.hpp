@@ -122,9 +122,9 @@ protected:
     {
         struct
         {
-            arrow::DataType        *type;
-            arrow::Type::type       type_id;
-            std::string             type_name;
+            std::shared_ptr<arrow::DataType>        type;
+            arrow::Type::type                       type_id;
+            std::string                             type_name;
         } arrow;
 
         struct
@@ -168,9 +168,9 @@ protected:
         TypeInfo(std::shared_ptr<arrow::DataType> arrow_type, Oid typid=InvalidOid)
             : TypeInfo()
         {
-            arrow.type = arrow_type.get();
             arrow.type_id = arrow_type->id();
             arrow.type_name = arrow_type->name();
+            arrow.type = std::move(arrow_type);
             pg.oid = typid;
             pg.len = 0;
             pg.byval = false;

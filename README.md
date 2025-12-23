@@ -179,3 +179,22 @@ select import_parquet_explicit(
 );
 ```
 
+## Packaging
+
+### Debian / Ubuntu
+
+After `sudo make install PG_CONFIG=/usr/lib/postgresql/17/bin/pg_config`
+
+```sh
+cd Debian
+# Copy the new extension binary
+sudo cp ../parquet_fdw.so postgresql-17-parquet-fdw/usr/lib/postgresql/17/lib/
+# Copy LLVM bytecode
+sudo cp ../src/*.bc postgresql-17-parquet-fdw/usr/lib/postgresql/17/lib/bitcode/parquet_fdw/src/
+# Copy extension bytecode index from installation
+sudo cp /usr/lib/postgresql/17/lib/bitcode/parquet_fdw.index.bc postgresql-17-parquet-fdw/usr/lib/postgresql/17/lib/bitcode/parquet_fdw.index.bc
+# Create package
+dpkg-deb --build --root-owner-group postgresql-17-parquet-fdw
+```
+
+After installation, dont't forget to restart the PostgreSQL server.
