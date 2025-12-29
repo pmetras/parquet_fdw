@@ -198,3 +198,8 @@ dpkg-deb --build --root-owner-group postgresql-17-parquet-fdw
 ```
 
 After installation, dont't forget to restart the PostgreSQL server.
+
+## Miscelaneous
+
+* [Synthetic documentation for developers, from AI](https://deepwiki.com/adjust/parquet_fdw)
+
