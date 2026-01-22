@@ -1,5 +1,5 @@
 ARG PG_MAJOR
-FROM postgres:${PG_MAJOR}-bullseye
+FROM postgres:${PG_MAJOR}-bookworm
 
 ENV LANG=C.UTF-8 PGDATA=/pgdata
 

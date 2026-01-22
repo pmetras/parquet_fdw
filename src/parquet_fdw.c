@@ -5,8 +5,19 @@
 #include "foreign/fdwapi.h"
 #include "utils/guc.h"
 
+#if PG_VERSION_NUM >= 180000
+#include "commands/explain_state.h"
+#endif
 
+
+#if PG_VERSION_NUM >= 180000
+PG_MODULE_MAGIC_EXT(
+    .name = "parquet_fdw",
+    .version = "0.2"
+);
+#else
 PG_MODULE_MAGIC;
+#endif
 
 void _PG_init(void);
 

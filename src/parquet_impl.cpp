@@ -74,6 +74,11 @@ extern "C"
 #if PG_VERSION_NUM >= 120000
 #include "nodes/pathnodes.h"
 #endif
+
+#if PG_VERSION_NUM >= 180000
+#include "commands/explain_format.h"
+#include "commands/explain_state.h"
+#endif
 }
 
 
@@ -82,6 +87,16 @@ extern "C"
 
 #if PG_VERSION_NUM < 110000
 #define PG_GETARG_JSONB_P PG_GETARG_JSONB
+#endif
+
+/*
+ * PG 18 added disabled_nodes parameter to create_foreignscan_path.
+ * Use this macro for the extra argument.
+ */
+#if PG_VERSION_NUM >= 180000
+#define CREATE_FOREIGNSCAN_DISABLED_NODES  0,
+#else
+#define CREATE_FOREIGNSCAN_DISABLED_NODES
 #endif
 
 
@@ -1538,6 +1553,7 @@ parquetGetForeignPaths(PlannerInfo *root,
     foreign_path = (Path *) create_foreignscan_path(root, baserel,
                                                     NULL,      /* pathtarget (default) */
                                                     baserel->rows,
+                                                    CREATE_FOREIGNSCAN_DISABLED_NODES
                                                     startup_cost,
                                                     total_cost,
                                                     pathkeys,
@@ -1565,6 +1581,7 @@ parquetGetForeignPaths(PlannerInfo *root,
         path = (Path *) create_foreignscan_path(root, baserel,
                                                 NULL,      /* pathtarget (default) */
                                                 baserel->rows,
+                                                CREATE_FOREIGNSCAN_DISABLED_NODES
                                                 startup_cost,
                                                 total_cost,
                                                 pathkeys,
@@ -1607,6 +1624,7 @@ parquetGetForeignPaths(PlannerInfo *root,
                  create_foreignscan_path(root, baserel,
                                         NULL,      /* pathtarget (default) */
                                         rows_per_worker,
+                                        CREATE_FOREIGNSCAN_DISABLED_NODES
                                         startup_cost,
                                         startup_cost + run_cost / (num_workers + 1),
                                         use_pathkeys ? pathkeys : NULL,
@@ -1639,6 +1657,7 @@ parquetGetForeignPaths(PlannerInfo *root,
                      create_foreignscan_path(root, baserel,
                                             NULL,      /* pathtarget (default) */
                                             rows_per_worker,
+                                            CREATE_FOREIGNSCAN_DISABLED_NODES
                                             startup_cost,
                                             total_cost,
                                             pathkeys,

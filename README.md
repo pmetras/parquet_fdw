@@ -4,6 +4,12 @@
 
 Read-only Apache Parquet foreign data wrapper for PostgreSQL.
 
+## Requirements
+
+- PostgreSQL 12-18 (versions 10-11 are end-of-life and no longer tested)
+- C++17 compiler
+- Apache Arrow 0.15+ (`libarrow` and `libparquet`)
+
 ## Installation
 
 `parquet_fdw` requires `libarrow` and `libparquet` installed in your system (requires version 0.15+, for previous versions use branch [arrow-0.14](https://github.com/adjust/parquet_fdw/tree/arrow-0.14)). Please refer to [libarrow installation page](https://arrow.apache.org/install/) or [building guide](https://github.com/apache/arrow/blob/master/docs/source/developers/cpp/building.rst).
