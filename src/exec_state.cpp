@@ -480,7 +480,6 @@ public:
 
     void rescan(void)
     {
-        /* TODO: clean binheap */
         for (auto reader: readers)
             reader->rescan();
         slots.clear();
@@ -699,7 +698,6 @@ public:
 
     void rescan(void)
     {
-        /* TODO: clean binheap */
         for (auto reader: readers)
             reader->rescan();
         slots.clear();

@@ -900,17 +900,13 @@ public:
 
     void open()
     {
-        arrow::Status   status;
-        std::unique_ptr<parquet::arrow::FileReader> reader;
-
-        status = parquet::arrow::FileReader::Make(
+        auto result = parquet::arrow::FileReader::Make(
                         arrow::default_memory_pool(),
-                        parquet::ParquetFileReader::OpenFile(filename, use_mmap),
-                        &reader);
-        if (!status.ok())
+                        parquet::ParquetFileReader::OpenFile(filename, use_mmap));
+        if (!result.ok())
             throw Error("failed to open Parquet file %s ('%s')",
-                        status.message().c_str(), filename.c_str());
-        this->reader = std::move(reader);
+                        result.status().message().c_str(), filename.c_str());
+        this->reader = std::move(result).ValueUnsafe();
 
         /* Enable parallel columns decoding/decompression if needed */
         this->reader->set_use_threads(this->use_threads && parquet_fdw_use_threads);
@@ -1140,17 +1136,13 @@ public:
 
     void open()
     {
-        arrow::Status   status;
-        std::unique_ptr<parquet::arrow::FileReader> reader;
-
-        status = parquet::arrow::FileReader::Make(
+        auto result = parquet::arrow::FileReader::Make(
                         arrow::default_memory_pool(),
-                        parquet::ParquetFileReader::OpenFile(filename, use_mmap),
-                        &reader);
-        if (!status.ok())
+                        parquet::ParquetFileReader::OpenFile(filename, use_mmap));
+        if (!result.ok())
             throw Error("failed to open Parquet file %s ('%s')",
-                        status.message().c_str(), filename.c_str());
-        this->reader = std::move(reader);
+                        result.status().message().c_str(), filename.c_str());
+        this->reader = std::move(result).ValueUnsafe();
 
         /* Enable parallel columns decoding/decompression if needed */
         this->reader->set_use_threads(this->use_threads && parquet_fdw_use_threads);

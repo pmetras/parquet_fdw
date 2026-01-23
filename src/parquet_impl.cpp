@@ -873,27 +873,26 @@ extract_rowgroups_list(const char *filename,
                        uint64 *total_rows) noexcept
 {
     std::unique_ptr<parquet::arrow::FileReader> reader;
-    arrow::Status   status;
     List           *rowgroups = NIL;
     std::string     error;
 
     /* Open parquet file to read meta information */
     try
     {
-        status = parquet::arrow::FileReader::Make(
+        auto result = parquet::arrow::FileReader::Make(
                 arrow::default_memory_pool(),
-                parquet::ParquetFileReader::OpenFile(filename, false),
-                &reader);
+                parquet::ParquetFileReader::OpenFile(filename, false));
 
-        if (!status.ok())
+        if (!result.ok())
             throw Error("failed to open Parquet file: %s ('%s')",
-                        status.message().c_str(), filename);
+                        result.status().message().c_str(), filename);
+        reader = std::move(result).ValueUnsafe();
 
         auto meta = reader->parquet_reader()->metadata();
         parquet::ArrowReaderProperties  props;
         parquet::arrow::SchemaManifest  manifest;
 
-        status = parquet::arrow::SchemaManifest::Make(meta->schema(), nullptr,
+        arrow::Status status = parquet::arrow::SchemaManifest::Make(meta->schema(), nullptr,
                                                       props, &manifest);
         if (!status.ok())
             throw Error("error creating arrow schema ('%s')", filename);
@@ -1045,16 +1044,15 @@ extract_parquet_fields(const char *path) noexcept
         std::unique_ptr<parquet::arrow::FileReader> reader;
         parquet::ArrowReaderProperties props;
         parquet::arrow::SchemaManifest manifest;
-        arrow::Status   status;
         FieldInfo      *fields;
 
-        status = parquet::arrow::FileReader::Make(
+        auto result = parquet::arrow::FileReader::Make(
                     arrow::default_memory_pool(),
-                    parquet::ParquetFileReader::OpenFile(path, false),
-                    &reader);
-        if (!status.ok())
+                    parquet::ParquetFileReader::OpenFile(path, false));
+        if (!result.ok())
             throw Error("failed to open Parquet file %s ('%s')",
-                        status.message().c_str(), path);
+                        result.status().message().c_str(), path);
+        reader = std::move(result).ValueUnsafe();
 
         auto p_schema = reader->parquet_reader()->metadata()->schema();
         if (!parquet::arrow::SchemaManifest::Make(p_schema, nullptr, props, &manifest).ok())
@@ -2105,16 +2103,15 @@ parquetAcquireSampleRowsFunc(Relation relation, int /* elevel */,
         try
         {
             std::unique_ptr<parquet::arrow::FileReader> reader;
-            arrow::Status   status;
             List           *rowgroups = NIL;
 
-            status = parquet::arrow::FileReader::Make(
+            auto result = parquet::arrow::FileReader::Make(
                         arrow::default_memory_pool(),
-                        parquet::ParquetFileReader::OpenFile(filename, false),
-                        &reader);
-            if (!status.ok())
+                        parquet::ParquetFileReader::OpenFile(filename, false));
+            if (!result.ok())
                 throw Error("failed to open Parquet file: %s",
-                                     status.message().c_str());
+                                     result.status().message().c_str());
+            reader = std::move(result).ValueUnsafe();
             auto meta = reader->parquet_reader()->metadata();
             num_rows += meta->num_rows();
 

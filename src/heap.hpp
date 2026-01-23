@@ -45,7 +45,7 @@ public:
     ~Heap()
     {
         if (_data)
-            delete _data;
+            delete[] _data;
     }
 
     T& operator[](int idx)
@@ -56,7 +56,7 @@ public:
     void init(size_t capacity, cmp_func cmp)
     {
         if (_data)
-            delete _data;
+            delete[] _data;
         _data = new T[capacity];
         _capacity = capacity;
         _cmp = cmp;
