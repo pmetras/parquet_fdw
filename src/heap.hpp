@@ -2,6 +2,7 @@
 #define PARQUET_FDW_HEAP_HPP
 
 #include <algorithm>
+#include <cassert>
 #include <cstddef>
 #include <functional> 
 
@@ -82,7 +83,7 @@ public:
      */
     void append(const T &new_value)
     {
-        /* TODO: assert _size <= _capacity */
+        assert(_size < _capacity);
         _data[_size++] = new_value;
     }
 
@@ -98,7 +99,7 @@ public:
 
     T& head()
     {
-        /* TODO: assert */
+        assert(_size > 0);
         return _data[0];
     }
 

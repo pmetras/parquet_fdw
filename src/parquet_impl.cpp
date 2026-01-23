@@ -2485,8 +2485,20 @@ parquetImportForeignSchema(ImportForeignSchemaStmt *stmt, Oid /* serverOid */)
 
         while ((f = readdir(d)) != NULL)
         {
-            /* TODO: use lstat if d_type == DT_UNKNOWN */
-            if (f->d_type == DT_REG)
+            bool is_regular = (f->d_type == DT_REG);
+
+            /* Some filesystems don't set d_type, fall back to lstat */
+            if (f->d_type == DT_UNKNOWN)
+            {
+                char *full_path = psprintf("%s/%s", stmt->remote_schema, f->d_name);
+                struct stat st;
+
+                if (lstat(full_path, &st) == 0 && S_ISREG(st.st_mode))
+                    is_regular = true;
+                pfree(full_path);
+            }
+
+            if (is_regular)
             {
                 char    *filename = pstrdup(f->d_name);
                 char    *path = psprintf("%s/%s", stmt->remote_schema, filename);
