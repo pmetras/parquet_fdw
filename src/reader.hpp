@@ -8,6 +8,8 @@
 #include "arrow/api.h"
 #include "parquet/arrow/reader.h"
 
+#include "common.hpp"
+
 extern "C"
 {
 #include "postgres.h"
@@ -154,15 +156,19 @@ protected:
          */
         int             index;
 
+        /* Cached UUID detection to avoid per-row checks */
+        bool            is_uuid;
+
         TypeInfo()
             : arrow{}, pg{}, need_cast(false),
-              castfunc(nullptr), outfunc(nullptr), infunc(nullptr), index(-1)
+              castfunc(nullptr), outfunc(nullptr), infunc(nullptr), index(-1),
+              is_uuid(false)
         {}
 
         TypeInfo(TypeInfo &&ti)
             : arrow(ti.arrow), pg(ti.pg), need_cast(ti.need_cast),
               castfunc(ti.castfunc), outfunc(ti.outfunc), infunc(ti.infunc),
-              children(std::move(ti.children)), index(-1)
+              children(std::move(ti.children)), index(-1), is_uuid(ti.is_uuid)
         {}
 
         TypeInfo(std::shared_ptr<arrow::DataType> arrow_type, Oid typid=InvalidOid)
@@ -170,11 +176,14 @@ protected:
         {
             arrow.type_id = arrow_type->id();
             arrow.type_name = arrow_type->name();
-            arrow.type = std::move(arrow_type);
+            arrow.type = arrow_type;
             pg.oid = typid;
             pg.len = 0;
             pg.byval = false;
             pg.align = 0;
+            /* Cache UUID detection to avoid per-row string comparisons */
+            is_uuid = is_fixed_size_uuid(arrow_type.get()) ||
+                      is_extension_uuid(arrow_type.get());
         }
     };
 

@@ -188,6 +188,14 @@ bytes_to_postgres_type(const char *bytes, Size len, const arrow::DataType *arrow
         case arrow::Type::DATE32:
             return DateADTGetDatum(*(int32 *) bytes +
                                    (UNIX_EPOCH_JDATE - POSTGRES_EPOCH_JDATE));
+        case arrow::Type::FIXED_SIZE_BINARY:
+            if (is_fixed_size_uuid(arrow_type))
+            {
+                pg_uuid_t *uuid = (pg_uuid_t *) palloc(sizeof(pg_uuid_t));
+                memcpy(uuid->data, bytes, UUID_LEN);
+                return UUIDPGetDatum(uuid);
+            }
+            return PointerGetDatum(cstring_to_text_with_len(bytes, len));
         default:
             return PointerGetDatum(NULL);
     }

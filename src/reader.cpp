@@ -472,8 +472,7 @@ Datum ParquetReader::read_primitive_type(arrow::Array *array,
                 elog(ERROR, "parquet_fdw: Expected FixedSizeBinaryArray but got %s", array->type()->ToString().c_str());
             }
 
-            // TODO, FIXME: A 16 bytes array is considered a UUID
-            if (is_fixed_size_uuid(typinfo.arrow.type.get()))
+            if (typinfo.is_uuid)
             {
                 const uint8_t *value = binarray->GetValue(i);
 
@@ -508,7 +507,7 @@ Datum ParquetReader::read_primitive_type(arrow::Array *array,
             int32_t vallen = 0;
             const char *value = reinterpret_cast<const char*>(binarray->GetValue(i, &vallen));
 
-            if (is_extension_uuid(typinfo.arrow.type.get()))
+            if (typinfo.is_uuid)
             {
                 elog(DEBUG1, "parquet_fdw: Reading UUID from EXTENSION: %02x%02x%02x%02x-%02x%02x-%02x%02x-%02x%02x-%02x%02x%02x%02x%02x%02x",
                     value[0], value[1], value[2], value[3], value[4], value[5], value[6], value[7],

@@ -598,6 +598,87 @@ DEBUG:  parquet_fdw: skip rowgroup 1
 ANALYZE example_sorted;
 DEBUG:  parquet_fdw: adding globbed filename @abs_srcdir@/data/simple/example1.parquet to list of files
 DEBUG:  parquet_fdw: adding globbed filename @abs_srcdir@/data/simple/example2.parquet to list of files
+-- UUID support (stored as fixed-size binary of 16 bytes)
+SET client_min_messages = DEBUG1;
+CREATE FOREIGN TABLE example_uuid (
+    id        INT4,
+    uuid_col  UUID,
+    name      TEXT)
+SERVER parquet_srv
+OPTIONS (filename '@abs_srcdir@/data/simple/example_uuid.parquet');
+DEBUG:  parquet_fdw: adding globbed filename @abs_srcdir@/data/simple/example_uuid.parquet to list of files
+SELECT * FROM example_uuid;
+DEBUG:  rehashing catalog cache id 33 for pg_foreign_table; 9 tups, 4 buckets
+DEBUG:  parquet_fdw: adding globbed filename @abs_srcdir@/data/simple/example_uuid.parquet to list of files
+DEBUG:  parquet_fdw: Reading UUID from FIXED_SIZE_BINARY: 550e8400-e29b-41d4-a716-446655440000
+DEBUG:  parquet_fdw: Reading UUID from FIXED_SIZE_BINARY: 6ba7b810-9dad-11d1-80b4-00c04fd430c8
+DEBUG:  parquet_fdw: Reading UUID from FIXED_SIZE_BINARY: 6ba7b811-9dad-11d1-80b4-00c04fd430c8
+DEBUG:  parquet_fdw: Reading UUID from FIXED_SIZE_BINARY: 00000000-0000-0000-0000-000000000000
+DEBUG:  parquet_fdw: Reading UUID from FIXED_SIZE_BINARY: ffffffff-ffff-ffff-ffff-ffffffffffff
+ id |               uuid_col               |  name  
+----+--------------------------------------+--------
+  1 | 550e8400-e29b-41d4-a716-446655440000 | first
+  2 | 6ba7b810-9dad-11d1-80b4-00c04fd430c8 | second
+  3 | 6ba7b811-9dad-11d1-80b4-00c04fd430c8 | third
+  4 | 00000000-0000-0000-0000-000000000000 | nil
+  5 | ffffffff-ffff-ffff-ffff-ffffffffffff | max
+(5 rows)
+
+-- UUID filtering
+SELECT * FROM example_uuid WHERE uuid_col = '550e8400-e29b-41d4-a716-446655440000';
+DEBUG:  parquet_fdw: adding globbed filename @abs_srcdir@/data/simple/example_uuid.parquet to list of files
+DEBUG:  parquet_fdw: Reading UUID from FIXED_SIZE_BINARY: 550e8400-e29b-41d4-a716-446655440000
+DEBUG:  parquet_fdw: Reading UUID from FIXED_SIZE_BINARY: 6ba7b810-9dad-11d1-80b4-00c04fd430c8
+DEBUG:  parquet_fdw: Reading UUID from FIXED_SIZE_BINARY: 6ba7b811-9dad-11d1-80b4-00c04fd430c8
+DEBUG:  parquet_fdw: Reading UUID from FIXED_SIZE_BINARY: 00000000-0000-0000-0000-000000000000
+DEBUG:  parquet_fdw: Reading UUID from FIXED_SIZE_BINARY: ffffffff-ffff-ffff-ffff-ffffffffffff
+ id |               uuid_col               | name  
+----+--------------------------------------+-------
+  1 | 550e8400-e29b-41d4-a716-446655440000 | first
+(1 row)
+
+SELECT * FROM example_uuid WHERE uuid_col = '00000000-0000-0000-0000-000000000000';
+DEBUG:  parquet_fdw: adding globbed filename @abs_srcdir@/data/simple/example_uuid.parquet to list of files
+DEBUG:  parquet_fdw: Reading UUID from FIXED_SIZE_BINARY: 550e8400-e29b-41d4-a716-446655440000
+DEBUG:  parquet_fdw: Reading UUID from FIXED_SIZE_BINARY: 6ba7b810-9dad-11d1-80b4-00c04fd430c8
+DEBUG:  parquet_fdw: Reading UUID from FIXED_SIZE_BINARY: 6ba7b811-9dad-11d1-80b4-00c04fd430c8
+DEBUG:  parquet_fdw: Reading UUID from FIXED_SIZE_BINARY: 00000000-0000-0000-0000-000000000000
+DEBUG:  parquet_fdw: Reading UUID from FIXED_SIZE_BINARY: ffffffff-ffff-ffff-ffff-ffffffffffff
+ id |               uuid_col               | name 
+----+--------------------------------------+------
+  4 | 00000000-0000-0000-0000-000000000000 | nil
+(1 row)
+
+-- UUID ordering
+SELECT * FROM example_uuid ORDER BY uuid_col;
+DEBUG:  parquet_fdw: adding globbed filename @abs_srcdir@/data/simple/example_uuid.parquet to list of files
+DEBUG:  parquet_fdw: Reading UUID from FIXED_SIZE_BINARY: 550e8400-e29b-41d4-a716-446655440000
+DEBUG:  parquet_fdw: Reading UUID from FIXED_SIZE_BINARY: 6ba7b810-9dad-11d1-80b4-00c04fd430c8
+DEBUG:  parquet_fdw: Reading UUID from FIXED_SIZE_BINARY: 6ba7b811-9dad-11d1-80b4-00c04fd430c8
+DEBUG:  parquet_fdw: Reading UUID from FIXED_SIZE_BINARY: 00000000-0000-0000-0000-000000000000
+DEBUG:  parquet_fdw: Reading UUID from FIXED_SIZE_BINARY: ffffffff-ffff-ffff-ffff-ffffffffffff
+ id |               uuid_col               |  name  
+----+--------------------------------------+--------
+  4 | 00000000-0000-0000-0000-000000000000 | nil
+  1 | 550e8400-e29b-41d4-a716-446655440000 | first
+  2 | 6ba7b810-9dad-11d1-80b4-00c04fd430c8 | second
+  3 | 6ba7b811-9dad-11d1-80b4-00c04fd430c8 | third
+  5 | ffffffff-ffff-ffff-ffff-ffffffffffff | max
+(5 rows)
+
+-- UUID with other conditions
+SELECT id, uuid_col FROM example_uuid WHERE name = 'first';
+DEBUG:  parquet_fdw: adding globbed filename @abs_srcdir@/data/simple/example_uuid.parquet to list of files
+DEBUG:  parquet_fdw: Reading UUID from FIXED_SIZE_BINARY: 550e8400-e29b-41d4-a716-446655440000
+DEBUG:  parquet_fdw: Reading UUID from FIXED_SIZE_BINARY: 6ba7b810-9dad-11d1-80b4-00c04fd430c8
+DEBUG:  parquet_fdw: Reading UUID from FIXED_SIZE_BINARY: 6ba7b811-9dad-11d1-80b4-00c04fd430c8
+DEBUG:  parquet_fdw: Reading UUID from FIXED_SIZE_BINARY: 00000000-0000-0000-0000-000000000000
+DEBUG:  parquet_fdw: Reading UUID from FIXED_SIZE_BINARY: ffffffff-ffff-ffff-ffff-ffffffffffff
+ id |               uuid_col               
+----+--------------------------------------
+  1 | 550e8400-e29b-41d4-a716-446655440000
+(1 row)
+
 SET client_min_messages = WARNING;
 DROP OWNED by regress_parquet_fdw;
 DROP EXTENSION parquet_fdw CASCADE;
