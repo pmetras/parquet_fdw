@@ -73,10 +73,9 @@ public:
         /* If allocation is bigger than segment then just palloc */
         if (size > SEGMENT_SIZE)
         {
-            MemoryContext oldcxt = MemoryContextSwitchTo(this->segments_cxt);
+            PgMemoryContextGuard guard(this->segments_cxt);
             void *block = exc_palloc(size);
             this->garbage_segments.push_back((char *) block);
-            MemoryContextSwitchTo(oldcxt);
 
             return block;
         }
@@ -86,22 +85,20 @@ public:
         /* If there is not enough space in current segment create a new one */
         if (this->segment_last_ptr - this->segment_cur_ptr < size)
         {
-            MemoryContext oldcxt;
-
             /*
              * Recycle the last segment at the next iteration (if there
              * was one)
              */
             if (this->segment_start_ptr)
-                this->garbage_segments.
-                    push_back(this->segment_start_ptr);
+                this->garbage_segments.push_back(this->segment_start_ptr);
 
-            oldcxt = MemoryContextSwitchTo(this->segments_cxt);
-            this->segment_start_ptr = (char *) exc_palloc(SEGMENT_SIZE);
+            {
+                PgMemoryContextGuard guard(this->segments_cxt);
+                this->segment_start_ptr = (char *) exc_palloc(SEGMENT_SIZE);
+            }
             this->segment_cur_ptr = this->segment_start_ptr;
             this->segment_last_ptr =
                 this->segment_start_ptr + SEGMENT_SIZE - 1;
-            MemoryContextSwitchTo(oldcxt);
         }
 
         ret = (void *) this->segment_cur_ptr;
@@ -552,7 +549,6 @@ Datum ParquetReader::read_primitive_type(arrow::Array *array,
 Datum ParquetReader::nested_list_to_datum(arrow::ListArray *larray, int pos,
                                            const TypeInfo &typinfo)
 {
-    MemoryContext oldcxt;
     ArrayType  *res;
     Datum      *values;
     bool       *nulls = NULL;
@@ -611,11 +607,10 @@ construct_array:
     lbs[0] = 1;
     PG_TRY();
     {
-        oldcxt = MemoryContextSwitchTo(allocator->context());
+        PgMemoryContextGuard guard(allocator->context());
         res = construct_md_array(values, nulls, 1, dims, lbs,
                                  elemtypinfo.pg.oid, elemtypinfo.pg.len,
                                  elemtypinfo.pg.byval, elemtypinfo.pg.align);
-        MemoryContextSwitchTo(oldcxt);
     }
     PG_CATCH();
     {
@@ -722,14 +717,10 @@ void ParquetReader::initialize_cast(TypeInfo &typinfo, const char *attname)
             {
                 case COERCION_PATH_FUNC:
                     {
-                        MemoryContext   oldctx;
-
-                        oldctx = MemoryContextSwitchTo(CurTransactionContext);
+                        PgMemoryContextGuard guard(CurTransactionContext);
                         typinfo.castfunc = (FmgrInfo *) palloc0(sizeof(FmgrInfo));
                         fmgr_info(funcid, typinfo.castfunc);
                         typinfo.need_cast = true;
-                        MemoryContextSwitchTo(oldctx);
-
                         break;
                     }
 
@@ -773,7 +764,6 @@ void ParquetReader::initialize_cast(TypeInfo &typinfo, const char *attname)
 
 FmgrInfo *ParquetReader::find_outfunc(Oid typoid)
 {
-    MemoryContext oldctx;
     Oid         funcoid;
     bool        isvarlena;
     FmgrInfo   *outfunc;
@@ -783,17 +773,15 @@ FmgrInfo *ParquetReader::find_outfunc(Oid typoid)
     if (!OidIsValid(funcoid))
         elog(ERROR, "output function for '%s' not found", format_type_be(typoid));
 
-    oldctx = MemoryContextSwitchTo(CurTransactionContext);
+    PgMemoryContextGuard guard(CurTransactionContext);
     outfunc = (FmgrInfo *) palloc0(sizeof(FmgrInfo));
     fmgr_info(funcoid, outfunc);
-    MemoryContextSwitchTo(oldctx);
 
     return outfunc;
 }
 
 FmgrInfo *ParquetReader::find_infunc(Oid typoid)
 {
-    MemoryContext oldctx;
     Oid         funcoid;
     Oid         typIOParam;
     FmgrInfo   *infunc;
@@ -803,10 +791,9 @@ FmgrInfo *ParquetReader::find_infunc(Oid typoid)
     if (!OidIsValid(funcoid))
         elog(ERROR, "input function for '%s' not found", format_type_be(typoid));
 
-    oldctx = MemoryContextSwitchTo(CurTransactionContext);
+    PgMemoryContextGuard guard(CurTransactionContext);
     infunc = (FmgrInfo *) palloc0(sizeof(FmgrInfo));
     fmgr_info(funcoid, infunc);
-    MemoryContextSwitchTo(oldctx);
 
     return infunc;
 }
@@ -926,13 +913,9 @@ public:
          */
         if (coordinator)
         {
-            coordinator->lock();
+            SpinLockGuard guard(*coordinator);
             if ((this->row_group = coordinator->next_rowgroup(reader_id)) == -1)
-            {
-                coordinator->unlock();
                 return false;
-            }
-            coordinator->unlock();
         }
         else
             this->row_group++;
@@ -1170,13 +1153,9 @@ public:
          */
         if (this->coordinator)
         {
-            coordinator->lock();
+            SpinLockGuard guard(*coordinator);
             if ((this->row_group = coordinator->next_rowgroup(reader_id)) == -1)
-            {
-                coordinator->unlock();
                 return false;
-            }
-            coordinator->unlock();
         }
         else
             this->row_group++;

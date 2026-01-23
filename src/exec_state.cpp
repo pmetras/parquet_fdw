@@ -1,5 +1,6 @@
 #include "exec_state.hpp"
 #include "heap.hpp"
+#include "common.hpp"
 
 #include <sys/time.h>
 #include <functional>
@@ -161,9 +162,8 @@ private:
 
         if (coord)
         {
-            coord->lock();
+            SpinLockGuard guard(*coord);
             cur_reader = coord->next_reader();
-            coord->unlock();
         }
 
         if (cur_reader >= files.size() || cur_reader < 0)
@@ -385,11 +385,8 @@ private:
 
             PG_TRY_INLINE(
                 {
-                    MemoryContext oldcxt;
-
-                    oldcxt = MemoryContextSwitchTo(cxt);
+                    PgMemoryContextGuard guard(cxt);
                     rs.slot = MakeTupleTableSlotCompat(tuple_desc);
-                    MemoryContextSwitchTo(oldcxt);
                 }, "failed to create a TupleTableSlot"
             );
 
@@ -542,11 +539,8 @@ private:
 
             PG_TRY_INLINE(
                 {
-                    MemoryContext oldcxt;
-
-                    oldcxt = MemoryContextSwitchTo(cxt);
+                    PgMemoryContextGuard guard(cxt);
                     rs.slot = MakeTupleTableSlotCompat(tuple_desc);
-                    MemoryContextSwitchTo(oldcxt);
                 }, "failed to create a TupleTableSlot"
             );
 

@@ -107,6 +107,42 @@ public:
     }
 };
 
+/*
+ * RAII guard for ParallelCoordinator spinlock.
+ * Automatically releases the lock when going out of scope.
+ *
+ * Usage:
+ *   if (coordinator) {
+ *       SpinLockGuard guard(*coordinator);
+ *       // Critical section - lock automatically released on scope exit
+ *   }
+ */
+class SpinLockGuard
+{
+private:
+    ParallelCoordinator &coordinator;
+
+public:
+    explicit SpinLockGuard(ParallelCoordinator &coord) noexcept
+        : coordinator(coord)
+    {
+        coordinator.lock();
+    }
+
+    ~SpinLockGuard() noexcept
+    {
+        coordinator.unlock();
+    }
+
+    /* Non-copyable */
+    SpinLockGuard(const SpinLockGuard&) = delete;
+    SpinLockGuard& operator=(const SpinLockGuard&) = delete;
+
+    /* Non-movable */
+    SpinLockGuard(SpinLockGuard&&) = delete;
+    SpinLockGuard& operator=(SpinLockGuard&&) = delete;
+};
+
 class FastAllocator;
 
 enum ReadStatus
