@@ -3,9 +3,9 @@
  */
 // basename comes from string.h on Linux,
 // but from libgen.h on other POSIX systems (see man basename)
-#ifndef GNU_SOURCE
+// dirname is always from libgen.h
 #include <libgen.h>
-#endif
+#include <stdlib.h>  /* for realpath */
 
 #include <sys/stat.h>
 #include <math.h>
@@ -102,6 +102,7 @@ extern "C"
 
 bool enable_multifile;
 bool enable_multifile_merge;
+char *parquet_fdw_allowed_directories = NULL;
 
 
 static void find_cmp_func(FmgrInfo *finfo, Oid type1, Oid type2);
@@ -479,6 +480,109 @@ typedef enum
 } ParserState;
 
 /*
+ * is_valid_path_char
+ *      Check if a character is valid in a file path.
+ *      Rejects control characters (0x00-0x1F) except for reasonable whitespace.
+ */
+static inline bool
+is_valid_path_char(char c)
+{
+    unsigned char uc = (unsigned char) c;
+
+    /* Reject control characters except tab (0x09) which might appear in quoted paths */
+    if (uc < 0x20 && uc != 0x09)
+        return false;
+
+    /* Reject DEL character */
+    if (uc == 0x7F)
+        return false;
+
+    return true;
+}
+
+/*
+ * is_path_allowed
+ *      Check if a file path is within one of the allowed directories.
+ *      Returns true if:
+ *      - parquet_fdw.allowed_directories is empty AND user is superuser
+ *      - The canonical path starts with one of the allowed directories
+ *      Returns false otherwise.
+ */
+static bool
+is_path_allowed(const char *path)
+{
+    char        resolved_path[MAXPGPATH];
+    char        resolved_dir[MAXPGPATH];
+    char       *allowed_dirs;
+    char       *dir;
+    char       *saveptr;
+
+    /* If no restrictions set, only superuser can access any path */
+    if (parquet_fdw_allowed_directories == NULL ||
+        parquet_fdw_allowed_directories[0] == '\0')
+    {
+        return superuser();
+    }
+
+    /* Resolve the actual path */
+    if (realpath(path, resolved_path) == NULL)
+    {
+        /*
+         * If the file doesn't exist yet (e.g., during validation),
+         * try to resolve the parent directory
+         */
+        char   *path_copy = pstrdup(path);
+        char   *parent = dirname(path_copy);
+
+        if (realpath(parent, resolved_path) == NULL)
+        {
+            pfree(path_copy);
+            return false;  /* Can't resolve path at all */
+        }
+        pfree(path_copy);
+    }
+
+    /* Parse the comma-separated list of allowed directories */
+    allowed_dirs = pstrdup(parquet_fdw_allowed_directories);
+
+    for (dir = strtok_r(allowed_dirs, ",", &saveptr);
+         dir != NULL;
+         dir = strtok_r(NULL, ",", &saveptr))
+    {
+        /* Skip leading whitespace */
+        while (*dir == ' ')
+            dir++;
+
+        /* Remove trailing whitespace */
+        char *end = dir + strlen(dir) - 1;
+        while (end > dir && *end == ' ')
+            *end-- = '\0';
+
+        if (*dir == '\0')
+            continue;
+
+        /* Resolve the allowed directory path */
+        if (realpath(dir, resolved_dir) == NULL)
+            continue;  /* Skip directories that don't exist */
+
+        /* Check if resolved_path starts with resolved_dir */
+        size_t dir_len = strlen(resolved_dir);
+        if (strncmp(resolved_path, resolved_dir, dir_len) == 0)
+        {
+            /* Make sure it's a proper prefix (followed by / or end of string) */
+            if (resolved_path[dir_len] == '/' || resolved_path[dir_len] == '\0')
+            {
+                pfree(allowed_dirs);
+                return true;
+            }
+        }
+    }
+
+    pfree(allowed_dirs);
+    return false;
+}
+
+/*
  * parse_filenames_list
  *      Parse space separated list of filenames.
  */
@@ -505,8 +609,9 @@ parse_filenames_list(const char *str)
                         state = PS_QUOTE;
                         break;
                     default:
-                        /* XXX we should check that *cur is a valid path symbol
-                         * but let's skip it for now */
+                        if (!is_valid_path_char(*cur))
+                            elog(ERROR, "parquet_fdw: invalid character (0x%02X) in filename",
+                                 (unsigned char) *cur);
                         state = PS_IDENT;
                         f = cur;
                         break;
@@ -521,6 +626,9 @@ parse_filenames_list(const char *str)
                         state = PS_START;
                         break;
                     default:
+                        if (!is_valid_path_char(*cur))
+                            elog(ERROR, "parquet_fdw: invalid character (0x%02X) at position %ld in filename starting with '%.*s'",
+                                 (unsigned char) *cur, (long)(cur - f), (int)Min(cur - f + 1, 32), f);
                         break;
                 }
                 break;
@@ -533,6 +641,9 @@ parse_filenames_list(const char *str)
                         state = PS_START;
                         break;
                     default:
+                        if (!is_valid_path_char(*cur))
+                            elog(ERROR, "parquet_fdw: invalid character (0x%02X) at position %ld in filename starting with '%.*s'",
+                                 (unsigned char) *cur, (long)(cur - f), (int)Min(cur - f + 1, 32), f);
                         break;
                 }
                 break;
@@ -564,8 +675,21 @@ lappend_globbed_filenames(List *filenames,
         case 0:
             for (size_t i = globbuf.gl_offs; i < globbuf.gl_pathc; i++)
             {
-                elog(DEBUG1, "parquet_fdw: adding globbed filename %s to list of files", globbuf.gl_pathv[i]);
-                filenames = lappend(filenames, makeString(pstrdup(globbuf.gl_pathv[i])));
+                const char *filepath = globbuf.gl_pathv[i];
+
+                /* Validate path against allowed directories */
+                if (!is_path_allowed(filepath))
+                {
+                    globfree(&globbuf);
+                    ereport(ERROR,
+                            (errcode(ERRCODE_INSUFFICIENT_PRIVILEGE),
+                             errmsg("parquet_fdw: path \"%s\" is not in allowed directories",
+                                    filepath),
+                             errhint("Set parquet_fdw.allowed_directories to include the directory, or contact a superuser.")));
+                }
+
+                elog(DEBUG1, "parquet_fdw: adding globbed filename %s to list of files", filepath);
+                filenames = lappend(filenames, makeString(pstrdup(filepath)));
             }
             break;
         case GLOB_NOSPACE:
@@ -864,6 +988,7 @@ extract_rowgroups_list(const char *filename,
                         FlushErrorState();
 
                         strncpy(errstr, errdata->message, ERROR_STR_LEN - 1);
+                        errstr[ERROR_STR_LEN - 1] = '\0';
                         FreeErrorData(errdata);
                     }
                     PG_END_TRY();
@@ -983,7 +1108,7 @@ extract_parquet_fields(const char *path) noexcept
 
             if (pg_type != InvalidOid)
             {
-                if (field->name().length() > 63)
+                if (field->name().length() >= NAMEDATALEN)
                     throw Error("field name '%s' in '%s' is too long",
                                 field->name().c_str(), path);
 
@@ -2671,7 +2796,7 @@ array_to_fields_list(ArrayType *attnames, ArrayType *atttypes)
         if (strlen(attname) >= NAMEDATALEN)
             elog(ERROR, "attribute name cannot be longer than %i", NAMEDATALEN - 1);
 
-        strcpy(field->name, attname);
+        memcpy(field->name, attname, strlen(attname) + 1);
         field->oid = types[i];
 
         res = lappend(res, field);

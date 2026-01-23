@@ -345,6 +345,7 @@ Datum ParquetReader::do_cast(Datum val, const TypeInfo &typinfo)
         FlushErrorState();
 
         strncpy(errstr, errdata->message, ERROR_STR_LEN - 1);
+        errstr[ERROR_STR_LEN - 1] = '\0';
         FreeErrorData(errdata);
     }
     PG_END_TRY();
@@ -761,6 +762,7 @@ void ParquetReader::initialize_cast(TypeInfo &typinfo, const char *attname)
         FlushErrorState();
 
         strncpy(errstr, errdata->message, ERROR_STR_LEN - 1);
+        errstr[ERROR_STR_LEN - 1] = '\0';
         FreeErrorData(errdata);
         MemoryContextSwitchTo(ccxt);
     }

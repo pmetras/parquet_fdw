@@ -64,10 +64,11 @@ extern void parquetShutdownForeignScan(ForeignScanState *node);
 extern List *parquetImportForeignSchema(ImportForeignSchemaStmt *stmt, Oid serverOid);
 extern Datum parquet_fdw_validator_impl(PG_FUNCTION_ARGS);
 
-/* GUC variable */
+/* GUC variables */
 extern bool parquet_fdw_use_threads;
 extern bool enable_multifile;
 extern bool enable_multifile_merge;
+extern char *parquet_fdw_allowed_directories;
 
 void
 _PG_init(void)
@@ -100,6 +101,17 @@ _PG_init(void)
 							&enable_multifile_merge,
 							true,
 							PGC_USERSET,
+							0,
+							NULL,
+							NULL,
+							NULL);
+
+	DefineCustomStringVariable("parquet_fdw.allowed_directories",
+							"Comma-separated list of directories where Parquet files can be read from. Empty means no restriction (superuser only).",
+							NULL,
+							&parquet_fdw_allowed_directories,
+							"",
+							PGC_SUSET,  /* Only superuser can set */
 							0,
 							NULL,
 							NULL,

@@ -99,6 +99,46 @@ GUC variables:
 * **parquet_fdw.use_threads** - global switch that allow user to enable or disable threads (default `true`);
 * **parquet_fdw.enable_multifile** - enable Multifile reader (default `true`).
 * **parquet_fdw.enable_multifile_merge** - enable Multifile Merge reader (default `true`).
+* **parquet_fdw.allowed_directories** - comma-separated list of directories from which Parquet files can be read. See [Security](#security) section below.
+
+### Security
+
+By default, `parquet_fdw` allows **only superusers** to create foreign tables that read Parquet files. This is because the extension can read any file accessible to the PostgreSQL server process.
+
+To allow non-superuser access, a superuser must configure the `parquet_fdw.allowed_directories` GUC variable with a comma-separated list of directories:
+
+```sql
+-- Allow reading from specific directories (superuser only)
+ALTER SYSTEM SET parquet_fdw.allowed_directories = '/data/parquet, /home/analytics/data';
+SELECT pg_reload_conf();
+```
+
+**Security model:**
+
+| User Type | `allowed_directories` | Access |
+|-----------|----------------------|--------|
+| Superuser | Empty (default) | All files accessible to PostgreSQL |
+| Superuser | Set | All files accessible to PostgreSQL |
+| Non-superuser | Empty (default) | **Denied** |
+| Non-superuser | Set | Only files within listed directories |
+
+**Important notes:**
+
+1. Paths are validated using `realpath()` to prevent symlink-based bypasses
+2. The `allowed_directories` setting uses `PGC_SUSET` context, meaning only superusers can modify it
+3. Path traversal attempts (e.g., `../`) are blocked by canonicalizing paths before validation
+4. The `files_func` option is also subject to these restrictions - paths returned by user-defined functions are validated
+
+**Example setup for multi-tenant environments:**
+
+```sql
+-- Create a dedicated directory for each department
+-- (run as superuser)
+ALTER SYSTEM SET parquet_fdw.allowed_directories = '/data/sales, /data/marketing';
+SELECT pg_reload_conf();
+
+-- Now non-superuser roles can create foreign tables pointing to these directories
+```
 
 ### Parallel queries
 
