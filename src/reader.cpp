@@ -840,6 +840,32 @@ void ParquetReader::set_coordinator(ParallelCoordinator *coord)
     this->coordinator = coord;
 }
 
+int ParquetReader::acquire_next_rowgroup(int &row_group)
+{
+    /*
+     * In case of parallel query get the row group index from the
+     * coordinator. Otherwise just increment it.
+     */
+    if (coordinator)
+    {
+        SpinLockGuard guard(*coordinator);
+        if ((row_group = coordinator->next_rowgroup(reader_id)) == -1)
+            return -1;
+    }
+    else
+        row_group++;
+
+    /*
+     * row_group cannot be less than zero at this point so it is safe to cast
+     * it to unsigned int
+     */
+    Assert(row_group >= 0);
+    if (static_cast<size_t>(row_group) >= this->rowgroups.size())
+        return -1;
+
+    return this->rowgroups[row_group];
+}
+
 class DefaultParquetReader : public ParquetReader
 {
 private:
@@ -907,28 +933,9 @@ public:
     {
         arrow::Status               status;
 
-        /*
-         * In case of parallel query get the row group index from the
-         * coordinator. Otherwise just increment it.
-         */
-        if (coordinator)
-        {
-            SpinLockGuard guard(*coordinator);
-            if ((this->row_group = coordinator->next_rowgroup(reader_id)) == -1)
-                return false;
-        }
-        else
-            this->row_group++;
-
-        /*
-         * row_group cannot be less than zero at this point so it is safe to cast
-         * it to unsigned int
-         */
-        Assert(this->row_group >= 0);
-        if ((uint) this->row_group >= this->rowgroups.size())
+        int rowgroup = acquire_next_rowgroup(this->row_group);
+        if (rowgroup < 0)
             return false;
-
-        int  rowgroup = this->rowgroups[this->row_group];
         auto rowgroup_meta = this->reader
                                 ->parquet_reader()
                                 ->metadata()
@@ -1147,28 +1154,9 @@ public:
         this->column_data.resize(this->types.size(), nullptr);
         this->column_nulls.resize(this->types.size());
 
-        /*
-         * In case of parallel query get the row group index from the
-         * coordinator. Otherwise just increment it.
-         */
-        if (this->coordinator)
-        {
-            SpinLockGuard guard(*coordinator);
-            if ((this->row_group = coordinator->next_rowgroup(reader_id)) == -1)
-                return false;
-        }
-        else
-            this->row_group++;
-
-        /*
-         * row_group cannot be less than zero at this point so it is safe to cast
-         * it to unsigned int
-         */
-        Assert(this->row_group >= 0);
-        if ((uint) this->row_group >= this->rowgroups.size())
+        int rowgroup = acquire_next_rowgroup(this->row_group);
+        if (rowgroup < 0)
             return false;
-
-        int  rowgroup = this->rowgroups[this->row_group];
         auto rowgroup_meta = this->reader
                                 ->parquet_reader()
                                 ->metadata()

@@ -284,6 +284,14 @@ protected:
                                                      int elem_size);
     template <typename T> inline const T* GetPrimitiveValues(const arrow::Array& arr);
 
+    /*
+     * acquire_next_rowgroup
+     *      Get the next rowgroup index to process. Updates row_group parameter
+     *      and returns the actual rowgroup number from rowgroups vector,
+     *      or -1 if no more rowgroups to process.
+     */
+    int acquire_next_rowgroup(int &row_group);
+
 public:
     ParquetReader(MemoryContext cxt);
     virtual ~ParquetReader() = 0;
