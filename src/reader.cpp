@@ -15,6 +15,7 @@ extern "C"
 #include "parser/parse_coerce.h"
 #include "utils/array.h"
 #include "utils/builtins.h"
+#include "utils/uuid.h"
 #include "utils/date.h"
 #include "utils/lsyscache.h"
 #include "utils/memutils.h"
@@ -72,10 +73,9 @@ public:
         /* If allocation is bigger than segment then just palloc */
         if (size > SEGMENT_SIZE)
         {
-            MemoryContext oldcxt = MemoryContextSwitchTo(this->segments_cxt);
+            PgMemoryContextGuard guard(this->segments_cxt);
             void *block = exc_palloc(size);
             this->garbage_segments.push_back((char *) block);
-            MemoryContextSwitchTo(oldcxt);
 
             return block;
         }
@@ -85,22 +85,20 @@ public:
         /* If there is not enough space in current segment create a new one */
         if (this->segment_last_ptr - this->segment_cur_ptr < size)
         {
-            MemoryContext oldcxt;
-
             /*
              * Recycle the last segment at the next iteration (if there
              * was one)
              */
             if (this->segment_start_ptr)
-                this->garbage_segments.
-                    push_back(this->segment_start_ptr);
+                this->garbage_segments.push_back(this->segment_start_ptr);
 
-            oldcxt = MemoryContextSwitchTo(this->segments_cxt);
-            this->segment_start_ptr = (char *) exc_palloc(SEGMENT_SIZE);
+            {
+                PgMemoryContextGuard guard(this->segments_cxt);
+                this->segment_start_ptr = (char *) exc_palloc(SEGMENT_SIZE);
+            }
             this->segment_cur_ptr = this->segment_start_ptr;
             this->segment_last_ptr =
                 this->segment_start_ptr + SEGMENT_SIZE - 1;
-            MemoryContextSwitchTo(oldcxt);
         }
 
         ret = (void *) this->segment_cur_ptr;
@@ -269,8 +267,8 @@ void ParquetReader::create_column_mapping(TupleDesc tupleDesc, const std::set<in
                         Assert(strct.children.size() == 2);
                         auto &key = strct.children[0];
                         auto &item = strct.children[1];
-                        Oid pg_key_type = to_postgres_type(key.field->type()->id());
-                        Oid pg_item_type = to_postgres_type(item.field->type()->id());
+                        Oid pg_key_type = to_postgres_type(key.field->type().get());
+                        Oid pg_item_type = to_postgres_type(item.field->type().get());
 
                         typinfo.children.emplace_back(key.field->type(),
                                                       pg_key_type);
@@ -320,7 +318,7 @@ Datum ParquetReader::do_cast(Datum val, const TypeInfo &typinfo)
     /* du, du cast, du cast mich... */
     PG_TRY();
     {
-        if (typinfo.castfunc != NULL)
+        if (typinfo.castfunc != nullptr)
         {
             val = FunctionCall1(typinfo.castfunc, val);
         }
@@ -344,6 +342,7 @@ Datum ParquetReader::do_cast(Datum val, const TypeInfo &typinfo)
         FlushErrorState();
 
         strncpy(errstr, errdata->message, ERROR_STR_LEN - 1);
+        errstr[ERROR_STR_LEN - 1] = '\0';
         FreeErrorData(errdata);
     }
     PG_END_TRY();
@@ -368,14 +367,14 @@ Datum ParquetReader::read_primitive_type(arrow::Array *array,
     {
         case arrow::Type::BOOL:
         {
-            arrow::BooleanArray *boolarray = (arrow::BooleanArray *) array;
+            auto *boolarray = static_cast<arrow::BooleanArray *>(array);
 
             res = BoolGetDatum(boolarray->Value(i));
             break;
         }
         case arrow::Type::INT8:
         {
-            arrow::Int8Array *intarray = (arrow::Int8Array *) array;
+            auto *intarray = static_cast<arrow::Int8Array *>(array);
             int value = intarray->Value(i);
 
             res = Int8GetDatum(value);
@@ -383,7 +382,7 @@ Datum ParquetReader::read_primitive_type(arrow::Array *array,
         }
         case arrow::Type::INT16:
         {
-            arrow::Int16Array *intarray = (arrow::Int16Array *) array;
+            auto *intarray = static_cast<arrow::Int16Array *>(array);
             int value = intarray->Value(i);
 
             res = Int16GetDatum(value);
@@ -391,7 +390,7 @@ Datum ParquetReader::read_primitive_type(arrow::Array *array,
         }
         case arrow::Type::INT32:
         {
-            arrow::Int32Array *intarray = (arrow::Int32Array *) array;
+            auto *intarray = static_cast<arrow::Int32Array *>(array);
             int value = intarray->Value(i);
 
             res = Int32GetDatum(value);
@@ -399,7 +398,7 @@ Datum ParquetReader::read_primitive_type(arrow::Array *array,
         }
         case arrow::Type::INT64:
         {
-            arrow::Int64Array *intarray = (arrow::Int64Array *) array;
+            auto *intarray = static_cast<arrow::Int64Array *>(array);
             int64 value = intarray->Value(i);
 
             res = Int64GetDatum(value);
@@ -407,7 +406,7 @@ Datum ParquetReader::read_primitive_type(arrow::Array *array,
         }
         case arrow::Type::FLOAT:
         {
-            arrow::FloatArray *farray = (arrow::FloatArray *) array;
+            auto *farray = static_cast<arrow::FloatArray *>(array);
             float value = farray->Value(i);
 
             res = Float4GetDatum(value);
@@ -415,7 +414,7 @@ Datum ParquetReader::read_primitive_type(arrow::Array *array,
         }
         case arrow::Type::DOUBLE:
         {
-            arrow::DoubleArray *darray = (arrow::DoubleArray *) array;
+            auto *darray = static_cast<arrow::DoubleArray *>(array);
             double value = darray->Value(i);
 
             res = Float8GetDatum(value);
@@ -424,7 +423,7 @@ Datum ParquetReader::read_primitive_type(arrow::Array *array,
         case arrow::Type::STRING:
         case arrow::Type::BINARY:
         {
-            arrow::BinaryArray *binarray = (arrow::BinaryArray *) array;
+            auto *binarray = static_cast<arrow::BinaryArray *>(array);
 
             int32_t vallen = 0;
             const char *value = reinterpret_cast<const char*>(binarray->GetValue(i, &vallen));
@@ -442,8 +441,8 @@ Datum ParquetReader::read_primitive_type(arrow::Array *array,
         {
             /* TODO: deal with timezones */
             TimestampTz ts;
-            arrow::TimestampArray *tsarray = (arrow::TimestampArray *) array;
-            auto tstype = (arrow::TimestampType *) array->type().get();
+            auto *tsarray = static_cast<arrow::TimestampArray *>(array);
+            auto *tstype = static_cast<arrow::TimestampType *>(array->type().get());
 
             to_postgres_timestamp(tstype, tsarray->Value(i), ts);
             res = TimestampGetDatum(ts);
@@ -451,20 +450,87 @@ Datum ParquetReader::read_primitive_type(arrow::Array *array,
         }
         case arrow::Type::DATE32:
         {
-            arrow::Date32Array *tsarray = (arrow::Date32Array *) array;
+            auto *tsarray = static_cast<arrow::Date32Array *>(array);
             int32 d = tsarray->Value(i);
 
             /*
-             * Postgres date starts with 2000-01-01 while unix date (which
-             * Parquet is using) starts with 1970-01-01. So we need to do
-             * simple calculations here.
-             */
+            * Postgres date starts with 2000-01-01 while unix date (which
+            * Parquet is using) starts with 1970-01-01. So we need to do
+            * simple calculations here.
+            */
             res = DateADTGetDatum(d + (UNIX_EPOCH_JDATE - POSTGRES_EPOCH_JDATE));
             break;
         }
+        case arrow::Type::FIXED_SIZE_BINARY:
+        {
+            arrow::FixedSizeBinaryArray *binarray = dynamic_cast<arrow::FixedSizeBinaryArray*>(array);
+            if (!binarray)
+            {
+                elog(ERROR, "parquet_fdw: Expected FixedSizeBinaryArray but got %s", array->type()->ToString().c_str());
+            }
+
+            if (typinfo.is_uuid)
+            {
+                const uint8_t *value = binarray->GetValue(i);
+
+                elog(DEBUG1, "parquet_fdw: Reading UUID from FIXED_SIZE_BINARY: %02x%02x%02x%02x-%02x%02x-%02x%02x-%02x%02x-%02x%02x%02x%02x%02x%02x",
+                    value[0], value[1], value[2], value[3], value[4], value[5], value[6], value[7],
+                    value[8], value[9], value[10], value[11], value[12], value[13], value[14], value[15]
+                );
+                pg_uuid_t *uuid_val = (pg_uuid_t*) this->allocator->fast_alloc(sizeof(pg_uuid_t));
+                memcpy(uuid_val->data, value, UUID_LEN);
+                res = UUIDPGetDatum(uuid_val);  // convert pointer to Datum
+            }
+            else
+            {
+                elog(DEBUG1, "parquet_fdw: Reading actual FIXED_SIZE_BINARY");
+                const int32_t vallen = binarray->byte_width();
+                const uint8_t *value = binarray->GetValue(i);
+
+                /* Build bytea */
+                int64 bytea_len = vallen + VARHDRSZ;
+                bytea *b = (bytea *) this->allocator->fast_alloc(bytea_len);
+                SET_VARSIZE(b, bytea_len);
+                memcpy(VARDATA(b), value, vallen);
+
+                res = PointerGetDatum(b);
+            }
+            break;
+        }
+        case arrow::Type::EXTENSION:
+        {
+            auto *binarray = static_cast<arrow::BinaryArray *>(array);
+
+            int32_t vallen = 0;
+            const char *value = reinterpret_cast<const char*>(binarray->GetValue(i, &vallen));
+
+            if (typinfo.is_uuid)
+            {
+                elog(DEBUG1, "parquet_fdw: Reading UUID from EXTENSION: %02x%02x%02x%02x-%02x%02x-%02x%02x-%02x%02x-%02x%02x%02x%02x%02x%02x",
+                    value[0], value[1], value[2], value[3], value[4], value[5], value[6], value[7],
+                    value[8], value[9], value[10], value[11], value[12], value[13], value[14], value[15]
+                );
+                pg_uuid_t *uuid_val = (pg_uuid_t*) this->allocator->fast_alloc(sizeof(pg_uuid_t));
+                memcpy(uuid_val->data, value, UUID_LEN);
+                res = UUIDPGetDatum(uuid_val);  // convert pointer to Datum
+            }
+            else
+            {
+                /* Build bytea */
+                int64 bytea_len = vallen + VARHDRSZ;
+                bytea *b = (bytea *) this->allocator->fast_alloc(bytea_len);
+                SET_VARSIZE(b, bytea_len);
+                memcpy(VARDATA(b), value, vallen);
+
+                res = PointerGetDatum(b);
+            }
+            break;
+        throw Error("unsupported user-extension column type: %s",
+                    typinfo.arrow.type_name.c_str());
+        }
         /* TODO: add other types */
         default:
-            throw Error("parquet_fdw: unsupported column type: %s",
+            throw Error("unsupported column type: %s",
                         typinfo.arrow.type_name.c_str());
     }
 
@@ -483,10 +549,9 @@ Datum ParquetReader::read_primitive_type(arrow::Array *array,
 Datum ParquetReader::nested_list_to_datum(arrow::ListArray *larray, int pos,
                                            const TypeInfo &typinfo)
 {
-    MemoryContext oldcxt;
     ArrayType  *res;
     Datum      *values;
-    bool       *nulls = NULL;
+    bool       *nulls = nullptr;
     int         dims[1];
     int         lbs[1];
     bool        error = false;
@@ -542,11 +607,10 @@ construct_array:
     lbs[0] = 1;
     PG_TRY();
     {
-        oldcxt = MemoryContextSwitchTo(allocator->context());
+        PgMemoryContextGuard guard(allocator->context());
         res = construct_md_array(values, nulls, 1, dims, lbs,
                                  elemtypinfo.pg.oid, elemtypinfo.pg.len,
                                  elemtypinfo.pg.byval, elemtypinfo.pg.align);
-        MemoryContextSwitchTo(oldcxt);
     }
     PG_CATCH();
     {
@@ -563,7 +627,7 @@ Datum
 ParquetReader::map_to_datum(arrow::MapArray *maparray, int pos,
                             const TypeInfo &typinfo)
 {
-	JsonbParseState *parseState = NULL;
+	JsonbParseState *parseState = nullptr;
     JsonbValue *jb;
     Datum       res;
 
@@ -575,7 +639,7 @@ ParquetReader::map_to_datum(arrow::MapArray *maparray, int pos,
     Assert(keys->length() == values->length());
     Assert(typinfo.children.size() == 2);
 
-    jb = pushJsonbValue(&parseState, WJB_BEGIN_OBJECT, NULL);
+    jb = pushJsonbValue(&parseState, WJB_BEGIN_OBJECT, nullptr);
 
     for (int i = 0; i < keys->length(); ++i)
     {
@@ -602,7 +666,7 @@ ParquetReader::map_to_datum(arrow::MapArray *maparray, int pos,
                        parseState, false);
     }
 
-    jb = pushJsonbValue(&parseState, WJB_END_OBJECT, NULL);
+    jb = pushJsonbValue(&parseState, WJB_END_OBJECT, nullptr);
     res = JsonbPGetDatum(JsonbValueToJsonb(jb));
 
     if (typinfo.need_cast)
@@ -620,7 +684,7 @@ ParquetReader::map_to_datum(arrow::MapArray *maparray, int pos,
 void ParquetReader::initialize_cast(TypeInfo &typinfo, const char *attname)
 {
     MemoryContext ccxt = CurrentMemoryContext;
-    Oid         src_oid = to_postgres_type(typinfo.arrow.type_id);
+    Oid         src_oid = to_postgres_type(typinfo.arrow.type.get());
     Oid         dst_oid = typinfo.pg.oid;
     bool        error = false;
     char        errstr[ERROR_STR_LEN];
@@ -653,14 +717,10 @@ void ParquetReader::initialize_cast(TypeInfo &typinfo, const char *attname)
             {
                 case COERCION_PATH_FUNC:
                     {
-                        MemoryContext   oldctx;
-
-                        oldctx = MemoryContextSwitchTo(CurTransactionContext);
+                        PgMemoryContextGuard guard(CurTransactionContext);
                         typinfo.castfunc = (FmgrInfo *) palloc0(sizeof(FmgrInfo));
                         fmgr_info(funcid, typinfo.castfunc);
                         typinfo.need_cast = true;
-                        MemoryContextSwitchTo(oldctx);
-
                         break;
                     }
 
@@ -692,6 +752,7 @@ void ParquetReader::initialize_cast(TypeInfo &typinfo, const char *attname)
         FlushErrorState();
 
         strncpy(errstr, errdata->message, ERROR_STR_LEN - 1);
+        errstr[ERROR_STR_LEN - 1] = '\0';
         FreeErrorData(errdata);
         MemoryContextSwitchTo(ccxt);
     }
@@ -703,7 +764,6 @@ void ParquetReader::initialize_cast(TypeInfo &typinfo, const char *attname)
 
 FmgrInfo *ParquetReader::find_outfunc(Oid typoid)
 {
-    MemoryContext oldctx;
     Oid         funcoid;
     bool        isvarlena;
     FmgrInfo   *outfunc;
@@ -713,17 +773,15 @@ FmgrInfo *ParquetReader::find_outfunc(Oid typoid)
     if (!OidIsValid(funcoid))
         elog(ERROR, "output function for '%s' not found", format_type_be(typoid));
 
-    oldctx = MemoryContextSwitchTo(CurTransactionContext);
+    PgMemoryContextGuard guard(CurTransactionContext);
     outfunc = (FmgrInfo *) palloc0(sizeof(FmgrInfo));
     fmgr_info(funcoid, outfunc);
-    MemoryContextSwitchTo(oldctx);
 
     return outfunc;
 }
 
 FmgrInfo *ParquetReader::find_infunc(Oid typoid)
 {
-    MemoryContext oldctx;
     Oid         funcoid;
     Oid         typIOParam;
     FmgrInfo   *infunc;
@@ -733,10 +791,9 @@ FmgrInfo *ParquetReader::find_infunc(Oid typoid)
     if (!OidIsValid(funcoid))
         elog(ERROR, "input function for '%s' not found", format_type_be(typoid));
 
-    oldctx = MemoryContextSwitchTo(CurTransactionContext);
+    PgMemoryContextGuard guard(CurTransactionContext);
     infunc = (FmgrInfo *) palloc0(sizeof(FmgrInfo));
     fmgr_info(funcoid, infunc);
-    MemoryContextSwitchTo(oldctx);
 
     return infunc;
 }
@@ -783,6 +840,32 @@ void ParquetReader::set_coordinator(ParallelCoordinator *coord)
     this->coordinator = coord;
 }
 
+int ParquetReader::acquire_next_rowgroup(int &row_group)
+{
+    /*
+     * In case of parallel query get the row group index from the
+     * coordinator. Otherwise just increment it.
+     */
+    if (coordinator)
+    {
+        SpinLockGuard guard(*coordinator);
+        if ((row_group = coordinator->next_rowgroup(reader_id)) == -1)
+            return -1;
+    }
+    else
+        row_group++;
+
+    /*
+     * row_group cannot be less than zero at this point so it is safe to cast
+     * it to unsigned int
+     */
+    Assert(row_group >= 0);
+    if (static_cast<size_t>(row_group) >= this->rowgroups.size())
+        return -1;
+
+    return this->rowgroups[row_group];
+}
+
 class DefaultParquetReader : public ParquetReader
 {
 private:
@@ -820,7 +903,7 @@ public:
     {
         this->filename = filename;
         this->reader_id = reader_id;
-        this->coordinator = NULL;
+        this->coordinator = nullptr;
         this->initialized = false;
     }
 
@@ -829,17 +912,13 @@ public:
 
     void open()
     {
-        arrow::Status   status;
-        std::unique_ptr<parquet::arrow::FileReader> reader;
-
-        status = parquet::arrow::FileReader::Make(
+        auto result = parquet::arrow::FileReader::Make(
                         arrow::default_memory_pool(),
-                        parquet::ParquetFileReader::OpenFile(filename, use_mmap),
-                        &reader);
-        if (!status.ok())
+                        parquet::ParquetFileReader::OpenFile(filename, use_mmap));
+        if (!result.ok())
             throw Error("failed to open Parquet file %s ('%s')",
-                        status.message().c_str(), filename.c_str());
-        this->reader = std::move(reader);
+                        result.status().message().c_str(), filename.c_str());
+        this->reader = std::move(result).ValueUnsafe();
 
         /* Enable parallel columns decoding/decompression if needed */
         this->reader->set_use_threads(this->use_threads && parquet_fdw_use_threads);
@@ -854,32 +933,9 @@ public:
     {
         arrow::Status               status;
 
-        /*
-         * In case of parallel query get the row group index from the
-         * coordinator. Otherwise just increment it.
-         */
-        if (coordinator)
-        {
-            coordinator->lock();
-            if ((this->row_group = coordinator->next_rowgroup(reader_id)) == -1)
-            {
-                coordinator->unlock();
-                return false;
-            }
-            coordinator->unlock();
-        }
-        else
-            this->row_group++;
-
-        /*
-         * row_group cannot be less than zero at this point so it is safe to cast
-         * it to unsigned int
-         */
-        Assert(this->row_group >= 0);
-        if ((uint) this->row_group >= this->rowgroups.size())
+        int rowgroup = acquire_next_rowgroup(this->row_group);
+        if (rowgroup < 0)
             return false;
-
-        int  rowgroup = this->rowgroups[this->row_group];
         auto rowgroup_meta = this->reader
                                 ->parquet_reader()
                                 ->metadata()
@@ -994,7 +1050,7 @@ public:
                 {
                     case arrow::Type::LIST:
                     {
-                        arrow::ListArray   *larray = (arrow::ListArray *) array;
+                        auto *larray = static_cast<arrow::ListArray *>(array);
 
                         slot->tts_values[attr] =
                             this->nested_list_to_datum(larray, chunkInfo.pos,
@@ -1003,7 +1059,7 @@ public:
                     }
                     case arrow::Type::MAP:
                     {
-                        arrow::MapArray *maparray = (arrow::MapArray*) array;
+                        auto *maparray = static_cast<arrow::MapArray *>(array);
                         Datum       jsonb = this->map_to_datum(maparray, chunkInfo.pos, typinfo);
 
                         /*
@@ -1060,7 +1116,7 @@ public:
     {
         this->filename = filename;
         this->reader_id = reader_id;
-        this->coordinator = NULL;
+        this->coordinator = nullptr;
         this->initialized = false;
     }
 
@@ -1069,17 +1125,13 @@ public:
 
     void open()
     {
-        arrow::Status   status;
-        std::unique_ptr<parquet::arrow::FileReader> reader;
-
-        status = parquet::arrow::FileReader::Make(
+        auto result = parquet::arrow::FileReader::Make(
                         arrow::default_memory_pool(),
-                        parquet::ParquetFileReader::OpenFile(filename, use_mmap),
-                        &reader);
-        if (!status.ok())
+                        parquet::ParquetFileReader::OpenFile(filename, use_mmap));
+        if (!result.ok())
             throw Error("failed to open Parquet file %s ('%s')",
-                        status.message().c_str(), filename.c_str());
-        this->reader = std::move(reader);
+                        result.status().message().c_str(), filename.c_str());
+        this->reader = std::move(result).ValueUnsafe();
 
         /* Enable parallel columns decoding/decompression if needed */
         this->reader->set_use_threads(this->use_threads && parquet_fdw_use_threads);
@@ -1102,32 +1154,9 @@ public:
         this->column_data.resize(this->types.size(), nullptr);
         this->column_nulls.resize(this->types.size());
 
-        /*
-         * In case of parallel query get the row group index from the
-         * coordinator. Otherwise just increment it.
-         */
-        if (this->coordinator)
-        {
-            coordinator->lock();
-            if ((this->row_group = coordinator->next_rowgroup(reader_id)) == -1)
-            {
-                coordinator->unlock();
-                return false;
-            }
-            coordinator->unlock();
-        }
-        else
-            this->row_group++;
-
-        /*
-         * row_group cannot be less than zero at this point so it is safe to cast
-         * it to unsigned int
-         */
-        Assert(this->row_group >= 0);
-        if ((uint) this->row_group >= this->rowgroups.size())
+        int rowgroup = acquire_next_rowgroup(this->row_group);
+        if (rowgroup < 0)
             return false;
-
-        int  rowgroup = this->rowgroups[this->row_group];
         auto rowgroup_meta = this->reader
                                 ->parquet_reader()
                                 ->metadata()
@@ -1220,52 +1249,52 @@ public:
                      */
                     case arrow::Type::BOOL:
                         {
-                            arrow::BooleanArray *boolarray = (arrow::BooleanArray *) array;
-                            ((bool *) data)[row] = boolarray->Value(row);
+                            auto *boolarray = static_cast<arrow::BooleanArray *>(array);
+                            static_cast<bool *>(data)[row] = boolarray->Value(row);
                             break;
                         }
                     case arrow::Type::INT8:
                         {
-                            arrow::Int8Array *intarray = (arrow::Int8Array *) array;
-                            ((int8 *) data)[row] = intarray->Value(row);
+                            auto *intarray = static_cast<arrow::Int8Array *>(array);
+                            static_cast<int8 *>(data)[row] = intarray->Value(row);
                             break;
                         }
                     case arrow::Type::INT16:
                         {
-                            arrow::Int16Array *intarray = (arrow::Int16Array *) array;
-                            ((int16 *) data)[row] = intarray->Value(row);
+                            auto *intarray = static_cast<arrow::Int16Array *>(array);
+                            static_cast<int16 *>(data)[row] = intarray->Value(row);
                             break;
                         }
                     case arrow::Type::INT32:
                         {
-                            arrow::Int32Array *intarray = (arrow::Int32Array *) array;
-                            ((int32 *) data)[row] = intarray->Value(row);
+                            auto *intarray = static_cast<arrow::Int32Array *>(array);
+                            static_cast<int32 *>(data)[row] = intarray->Value(row);
                             break;
                         }
                     case arrow::Type::FLOAT:
                         {
-                            arrow::FloatArray *farray = (arrow::FloatArray *) array;
-                            ((float *) data)[row] = farray->Value(row);
+                            auto *farray = static_cast<arrow::FloatArray *>(array);
+                            static_cast<float *>(data)[row] = farray->Value(row);
                             break;
                         }
                     case arrow::Type::DATE32:
                         {
-                            arrow::Date32Array *tsarray = (arrow::Date32Array *) array;
-                            ((int *) data)[row] = tsarray->Value(row);
+                            auto *tsarray = static_cast<arrow::Date32Array *>(array);
+                            static_cast<int *>(data)[row] = tsarray->Value(row);
                             break;
                         }
 
                     case arrow::Type::LIST:
                         {
-                            auto larray = (arrow::ListArray *) array;
+                            auto *larray = static_cast<arrow::ListArray *>(array);
 
-                            ((Datum *) data)[row] =
+                            static_cast<Datum *>(data)[row] =
                                 this->nested_list_to_datum(larray, j, typinfo);
                             break;
                         }
                     case arrow::Type::MAP:
                         {
-                            arrow::MapArray* maparray = (arrow::MapArray*) array;
+                            auto *maparray = static_cast<arrow::MapArray *>(array);
                             Datum       jsonb = this->map_to_datum(maparray, j, typinfo);
 
                             /*
@@ -1279,7 +1308,7 @@ public:
                             memcpy(jsonb_val, DatumGetPointer(jsonb), VARSIZE_ANY(jsonb));
                             pfree(DatumGetPointer(jsonb));
 
-                            ((Datum *) data)[row] = PointerGetDatum(jsonb_val);
+                            static_cast<Datum *>(data)[row] = PointerGetDatum(jsonb_val);
 
                             break;
                         }
@@ -1288,7 +1317,7 @@ public:
                          * For larger types we copy already converted into
                          * Datum values.
                          */
-                        ((Datum *) data)[row] =
+                        static_cast<Datum *>(data)[row] =
                             this->read_primitive_type(array, typinfo, j);
                 }
                 this->column_nulls[col][row] = false;
@@ -1344,19 +1373,19 @@ public:
                 switch(typinfo.arrow.type_id)
                 {
                     case arrow::Type::BOOL:
-                        slot->tts_values[attr] = BoolGetDatum(((bool *) data)[this->row]);
+                        slot->tts_values[attr] = BoolGetDatum(static_cast<bool *>(data)[this->row]);
                         break;
                     case arrow::Type::INT8:
-                        slot->tts_values[attr] = Int8GetDatum(((int8 *) data)[this->row]);
+                        slot->tts_values[attr] = Int8GetDatum(static_cast<int8 *>(data)[this->row]);
                         break;
                     case arrow::Type::INT16:
-                        slot->tts_values[attr] = Int16GetDatum(((int16 *) data)[this->row]);
+                        slot->tts_values[attr] = Int16GetDatum(static_cast<int16 *>(data)[this->row]);
                         break;
                     case arrow::Type::INT32:
-                        slot->tts_values[attr] = Int32GetDatum(((int32 *) data)[this->row]);
+                        slot->tts_values[attr] = Int32GetDatum(static_cast<int32 *>(data)[this->row]);
                         break;
                     case arrow::Type::FLOAT:
-                        slot->tts_values[attr] = Float4GetDatum(((float *) data)[this->row]);
+                        slot->tts_values[attr] = Float4GetDatum(static_cast<float *>(data)[this->row]);
                         break;
                     case arrow::Type::DATE32:
                         {
@@ -1365,13 +1394,13 @@ public:
                              * Parquet is using) starts with 1970-01-01. So we need to do
                              * simple calculations here.
                              */
-                            int dt = ((int *) data)[this->row]
+                            int dt = static_cast<int *>(data)[this->row]
                                 + (UNIX_EPOCH_JDATE - POSTGRES_EPOCH_JDATE);
                             slot->tts_values[attr] = DateADTGetDatum(dt);
                         }
                         break;
                     default:
-                        slot->tts_values[attr] = ((Datum *) data)[this->row];
+                        slot->tts_values[attr] = static_cast<Datum *>(data)[this->row];
                         need_cast = false;
                 }
 

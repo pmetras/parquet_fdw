@@ -1,5 +1,6 @@
 #include "exec_state.hpp"
 #include "heap.hpp"
+#include "common.hpp"
 
 #include <sys/time.h>
 #include <functional>
@@ -45,6 +46,7 @@ public:
     Size estimate_coord_size() 
     {
         Assert(false && "estimate_coord_size is not supported for TrivialExecutionState");
+        return 0;
     }
     void init_coord()
     {
@@ -56,7 +58,7 @@ public:
 class SingleFileExecutionState : public ParquetFdwExecutionState
 {
 private:
-    ParquetReader      *reader;
+    std::unique_ptr<ParquetReader> reader;
     MemoryContext       cxt;
     ParallelCoordinator *coord;
     TupleDesc           tuple_desc;
@@ -72,15 +74,11 @@ public:
                              std::set<int> attrs_used,
                              bool use_threads,
                              bool use_mmap)
-        : cxt(cxt), tuple_desc(tuple_desc), attrs_used(attrs_used),
-          use_mmap(use_mmap), use_threads(use_threads)
+        : reader(nullptr), cxt(cxt), coord(nullptr), tuple_desc(tuple_desc),
+          attrs_used(attrs_used), use_mmap(use_mmap), use_threads(use_threads)
     { }
 
-    ~SingleFileExecutionState()
-    {
-        if (reader)
-            delete reader;
-    }
+    ~SingleFileExecutionState() = default;
 
     bool next(TupleTableSlot *slot, bool fake)
     {
@@ -105,19 +103,19 @@ public:
         foreach (lc, rowgroups)
             rg.push_back(lfirst_int(lc));
 
-        reader = create_parquet_reader(filename, cxt);
+        reader.reset(create_parquet_reader(filename, cxt));
         reader->set_options(use_threads, use_mmap);
         reader->set_rowgroups_list(rg);
         reader->open();
         reader->create_column_mapping(tuple_desc, attrs_used);
     }
 
-    void set_coordinator(ParallelCoordinator *coord)
+    void set_coordinator(ParallelCoordinator *new_coord)
     {
-        this->coord = coord;
+        this->coord = new_coord;
 
         if (reader)
-            reader->set_coordinator(coord);
+            reader->set_coordinator(new_coord);
     }
 
     Size estimate_coord_size()
@@ -127,7 +125,7 @@ public:
 
     void init_coord()
     {
-        coord->init_single(NULL, 0);
+        coord->init_single(nullptr, 0);
     }
 };
 
@@ -140,7 +138,7 @@ private:
         std::vector<int>    rowgroups;
     };
 private:
-    ParquetReader          *reader;
+    std::unique_ptr<ParquetReader> reader;
 
     std::vector<FileRowgroups> files;
     uint64_t                cur_reader;
@@ -154,21 +152,19 @@ private:
     ParallelCoordinator    *coord;
 
 private:
-    ParquetReader *get_next_reader()
+    std::unique_ptr<ParquetReader> get_next_reader()
     {
-        ParquetReader *r;
-
         if (coord)
         {
-            coord->lock();
+            SpinLockGuard guard(*coord);
             cur_reader = coord->next_reader();
-            coord->unlock();
         }
 
         if (cur_reader >= files.size() || cur_reader < 0)
-            return NULL;
+            return nullptr;
 
-        r = create_parquet_reader(files[cur_reader].filename.c_str(), cxt, cur_reader);
+        auto r = std::unique_ptr<ParquetReader>(
+            create_parquet_reader(files[cur_reader].filename.c_str(), cxt, cur_reader));
         r->set_rowgroups_list(files[cur_reader].rowgroups);
         r->set_options(use_threads, use_mmap);
         r->set_coordinator(coord);
@@ -186,24 +182,21 @@ public:
                             std::set<int> attrs_used,
                             bool use_threads,
                             bool use_mmap)
-        : reader(NULL), cur_reader(0), cxt(cxt), tuple_desc(tuple_desc),
+        : reader(nullptr), cur_reader(0), cxt(cxt), tuple_desc(tuple_desc),
           attrs_used(attrs_used), use_threads(use_threads), use_mmap(use_mmap),
-          coord(NULL)
+          coord(nullptr)
     { }
 
-    ~MultifileExecutionState()
-    {
-        if (reader)
-            delete reader;
-    }
+    ~MultifileExecutionState() = default;
 
     bool next(TupleTableSlot *slot, bool fake=false)
     {
         ReadStatus  res;
 
-        if (unlikely(reader == NULL))
+        if (unlikely(!reader))
         {
-            if ((reader = this->get_next_reader()) == NULL)
+            reader = this->get_next_reader();
+            if (!reader)
                 return false;
         }
 
@@ -214,9 +207,6 @@ public:
         {
             while (true)
             {
-                if (reader)
-                    delete reader;
-
                 reader = this->get_next_reader();
                 if (!reader)
                     return false;
@@ -288,7 +278,7 @@ protected:
     };
 
 protected:
-    std::vector<ParquetReader *> readers;
+    std::vector<std::unique_ptr<ParquetReader>> readers;
 
     MemoryContext       cxt;
     TupleDesc           tuple_desc;
@@ -349,7 +339,7 @@ protected:
     void set_coordinator(ParallelCoordinator *coord)
     {
         this->coord = coord;
-        for (auto reader : readers)
+        for (auto &reader : readers)
             reader->set_coordinator(coord);
     }
 
@@ -378,17 +368,14 @@ private:
         int i = 0;
 
         slots.init(readers.size(), cmp);
-        for (auto reader: readers)
+        for (auto &reader: readers)
         {
             ReaderSlot    rs;
 
             PG_TRY_INLINE(
                 {
-                    MemoryContext oldcxt;
-
-                    oldcxt = MemoryContextSwitchTo(cxt);
+                    PgMemoryContextGuard guard(cxt);
                     rs.slot = MakeTupleTableSlotCompat(tuple_desc);
-                    MemoryContextSwitchTo(oldcxt);
                 }, "failed to create a TupleTableSlot"
             );
 
@@ -425,12 +412,10 @@ public:
     {
 #if PG_VERSION_NUM < 110000
         /* Destroy tuple slots if any */
-        for (int i = 0; i < slots.size(); i++)
+        for (size_t i = 0; i < slots.size(); i++)
             ExecDropSingleTupleTableSlot(slots[i].slot);
 #endif
-
-        for (auto it: readers)
-            delete it;
+        /* readers cleaned up automatically by unique_ptr */
     }
 
     bool next(TupleTableSlot *slot, bool /* fake=false */)
@@ -479,8 +464,7 @@ public:
 
     void rescan(void)
     {
-        /* TODO: clean binheap */
-        for (auto reader: readers)
+        for (auto &reader: readers)
             reader->rescan();
         slots.clear();
         slots_initialized = false;
@@ -488,7 +472,6 @@ public:
 
     void add_file(const char *filename, List *rowgroups)
     {
-        ParquetReader      *r;
         ListCell           *lc;
         std::vector<int>    rg;
         int32_t             reader_id = readers.size();
@@ -496,12 +479,13 @@ public:
         foreach (lc, rowgroups)
             rg.push_back(lfirst_int(lc));
 
-        r = create_parquet_reader(filename, cxt, reader_id);
+        auto r = std::unique_ptr<ParquetReader>(
+            create_parquet_reader(filename, cxt, reader_id));
         r->set_rowgroups_list(rg);
         r->set_options(use_threads, use_mmap);
         r->open();
         r->create_column_mapping(tuple_desc, attrs_used);
-        readers.push_back(r);
+        readers.push_back(std::move(r));
     }
 };
 
@@ -536,21 +520,18 @@ private:
         this->ts_active.resize(readers.size(), 0);
 
         slots.init(readers.size(), cmp);
-        for (auto reader: readers)
+        for (auto &reader: readers)
         {
             ReaderSlot    rs;
 
             PG_TRY_INLINE(
                 {
-                    MemoryContext oldcxt;
-
-                    oldcxt = MemoryContextSwitchTo(cxt);
+                    PgMemoryContextGuard guard(cxt);
                     rs.slot = MakeTupleTableSlotCompat(tuple_desc);
-                    MemoryContextSwitchTo(oldcxt);
                 }, "failed to create a TupleTableSlot"
             );
 
-            activate_reader(reader);
+            activate_reader(reader.get());
             reader->create_column_mapping(tuple_desc, attrs_used);
 
             if (reader->next(rs.slot) == RS_SUCCESS)
@@ -571,7 +552,7 @@ private:
      *      readers exceeds the limit, function closes the least recently used
      *      one.
      */
-    ParquetReader *activate_reader(ParquetReader *reader)
+    void activate_reader(ParquetReader *reader)
     {
         struct timeval tv;
 
@@ -579,7 +560,7 @@ private:
 
         /* If reader's already active then we're done here */
         if (ts_active[reader->id()] > 0)
-            return reader;
+            return;
 
         /* Does the number of active readers exceeds limit? */
         if (max_open_files > 0 && num_active_readers >= max_open_files)
@@ -588,7 +569,7 @@ private:
             int         idx_min = -1;
 
             /* Find the least recently used reader */
-            for (std::vector<ParquetReader *>::size_type i = 0; i < readers.size(); ++i) {
+            for (size_t i = 0; i < readers.size(); ++i) {
                 if (ts_active[i] > 0 && ts_active[i] < ts_min) {
                     ts_min = ts_active[i];
                     idx_min = i;
@@ -603,12 +584,10 @@ private:
         }
 
         /* Reopen the reader and update timestamp */
-        gettimeofday(&tv, NULL);
+        gettimeofday(&tv, nullptr);
         ts_active[reader->id()] = tv.tv_sec*1000LL + tv.tv_usec/1000;
         reader->open();
         num_active_readers++;
-
-        return reader;
     }
 
 public:
@@ -634,12 +613,10 @@ public:
     {
 #if PG_VERSION_NUM < 110000
         /* Destroy tuple slots if any */
-        for (int i = 0; i < slots.size(); i++)
+        for (size_t i = 0; i < slots.size(); i++)
             ExecDropSingleTupleTableSlot(slots[i].slot);
 #endif
-
-        for (auto it: readers)
-            delete it;
+        /* readers cleaned up automatically by unique_ptr */
     }
 
     bool next(TupleTableSlot *slot, bool /* fake=false */)
@@ -678,7 +655,7 @@ public:
 
                 case RS_INACTIVE:
                     /* Reactivate reader and retry */
-                    activate_reader(readers[head.reader_id]);
+                    activate_reader(readers[head.reader_id].get());
                     break;
 
                 case RS_EOF:
@@ -698,8 +675,7 @@ public:
 
     void rescan(void)
     {
-        /* TODO: clean binheap */
-        for (auto reader: readers)
+        for (auto &reader: readers)
             reader->rescan();
         slots.clear();
         slots_initialized = false;
@@ -707,7 +683,6 @@ public:
 
     void add_file(const char *filename, List *rowgroups)
     {
-        ParquetReader      *r;
         ListCell           *lc;
         std::vector<int>    rg;
         int32_t             reader_id = readers.size();
@@ -715,10 +690,11 @@ public:
         foreach (lc, rowgroups)
             rg.push_back(lfirst_int(lc));
 
-        r = create_parquet_reader(filename, cxt, reader_id, true);
+        auto r = std::unique_ptr<ParquetReader>(
+            create_parquet_reader(filename, cxt, reader_id, true));
         r->set_rowgroups_list(rg);
         r->set_options(use_threads, use_mmap);
-        readers.push_back(r);
+        readers.push_back(std::move(r));
     }
 
     void set_coordinator(ParallelCoordinator * /* coord */)

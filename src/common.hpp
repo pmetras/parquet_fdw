@@ -55,12 +55,51 @@ struct Error : std::exception
     char const* what() const throw() { return text; }
 };
 
+/*
+ * RAII guard for PostgreSQL MemoryContext switching.
+ * Automatically restores the previous context when going out of scope.
+ *
+ * Usage:
+ *   {
+ *       PgMemoryContextGuard guard(some_context);
+ *       // allocations here happen in some_context
+ *   } // previous context automatically restored
+ */
+class PgMemoryContextGuard
+{
+private:
+    MemoryContext old_context;
+
+public:
+    explicit PgMemoryContextGuard(MemoryContext new_context) noexcept
+        : old_context(MemoryContextSwitchTo(new_context))
+    {}
+
+    ~PgMemoryContextGuard() noexcept
+    {
+        MemoryContextSwitchTo(old_context);
+    }
+
+    /* Non-copyable */
+    PgMemoryContextGuard(const PgMemoryContextGuard&) = delete;
+    PgMemoryContextGuard& operator=(const PgMemoryContextGuard&) = delete;
+
+    /* Non-movable (prevent accidental moves that would break RAII) */
+    PgMemoryContextGuard(PgMemoryContextGuard&&) = delete;
+    PgMemoryContextGuard& operator=(PgMemoryContextGuard&&) = delete;
+
+    /* Get the previous context if needed */
+    MemoryContext previous_context() const noexcept { return old_context; }
+};
+
 
 void *exc_palloc(std::size_t size);
-Oid to_postgres_type(int arrow_type);
+bool is_extension_uuid(const arrow::DataType *arrow_type);
+bool is_fixed_size_uuid(const arrow::DataType *arrow_type);
+Oid to_postgres_type(const arrow::DataType *arrow_type);
 Datum bytes_to_postgres_type(const char *bytes, Size len, const arrow::DataType *arrow_type);
 char *tolowercase(const char *input, char *output);
-arrow::Type::type get_arrow_list_elem_type(arrow::DataType *type);
+arrow::DataType *get_arrow_list_elem_type(arrow::DataType *type);
 void datum_to_jsonb(Datum value, Oid typoid, bool isnull, FmgrInfo *outfunc,
                     JsonbParseState *result, bool iskey);
 int32 string_to_int32(const char *s);

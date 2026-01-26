@@ -8,6 +8,8 @@
 #include "arrow/api.h"
 #include "parquet/arrow/reader.h"
 
+#include "common.hpp"
+
 extern "C"
 {
 #include "postgres.h"
@@ -105,6 +107,42 @@ public:
     }
 };
 
+/*
+ * RAII guard for ParallelCoordinator spinlock.
+ * Automatically releases the lock when going out of scope.
+ *
+ * Usage:
+ *   if (coordinator) {
+ *       SpinLockGuard guard(*coordinator);
+ *       // Critical section - lock automatically released on scope exit
+ *   }
+ */
+class SpinLockGuard
+{
+private:
+    ParallelCoordinator &coordinator;
+
+public:
+    explicit SpinLockGuard(ParallelCoordinator &coord) noexcept
+        : coordinator(coord)
+    {
+        coordinator.lock();
+    }
+
+    ~SpinLockGuard() noexcept
+    {
+        coordinator.unlock();
+    }
+
+    /* Non-copyable */
+    SpinLockGuard(const SpinLockGuard&) = delete;
+    SpinLockGuard& operator=(const SpinLockGuard&) = delete;
+
+    /* Non-movable */
+    SpinLockGuard(SpinLockGuard&&) = delete;
+    SpinLockGuard& operator=(SpinLockGuard&&) = delete;
+};
+
 class FastAllocator;
 
 enum ReadStatus
@@ -122,8 +160,9 @@ protected:
     {
         struct
         {
-            arrow::Type::type   type_id;
-            std::string         type_name;
+            std::shared_ptr<arrow::DataType>        type;
+            arrow::Type::type                       type_id;
+            std::string                             type_name;
         } arrow;
 
         struct
@@ -135,7 +174,7 @@ protected:
         } pg;
 
         /*
-         * Cast functions from dafult postgres type defined in `to_postgres_type`
+         * Cast functions from default postgres type defined in `to_postgres_type`
          * to actual table column type.
          */
         bool            need_cast;
@@ -153,15 +192,19 @@ protected:
          */
         int             index;
 
+        /* Cached UUID detection to avoid per-row checks */
+        bool            is_uuid;
+
         TypeInfo()
             : arrow{}, pg{}, need_cast(false),
-              castfunc(nullptr), outfunc(nullptr), infunc(nullptr), index(-1)
+              castfunc(nullptr), outfunc(nullptr), infunc(nullptr), index(-1),
+              is_uuid(false)
         {}
 
         TypeInfo(TypeInfo &&ti)
             : arrow(ti.arrow), pg(ti.pg), need_cast(ti.need_cast),
               castfunc(ti.castfunc), outfunc(ti.outfunc), infunc(ti.infunc),
-              children(std::move(ti.children)), index(-1)
+              children(std::move(ti.children)), index(-1), is_uuid(ti.is_uuid)
         {}
 
         TypeInfo(std::shared_ptr<arrow::DataType> arrow_type, Oid typid=InvalidOid)
@@ -169,10 +212,14 @@ protected:
         {
             arrow.type_id = arrow_type->id();
             arrow.type_name = arrow_type->name();
+            arrow.type = arrow_type;
             pg.oid = typid;
             pg.len = 0;
             pg.byval = false;
             pg.align = 0;
+            /* Cache UUID detection to avoid per-row string comparisons */
+            is_uuid = is_fixed_size_uuid(arrow_type.get()) ||
+                      is_extension_uuid(arrow_type.get());
         }
     };
 
@@ -236,6 +283,14 @@ protected:
                                                      const arrow::Array *array,
                                                      int elem_size);
     template <typename T> inline const T* GetPrimitiveValues(const arrow::Array& arr);
+
+    /*
+     * acquire_next_rowgroup
+     *      Get the next rowgroup index to process. Updates row_group parameter
+     *      and returns the actual rowgroup number from rowgroups vector,
+     *      or -1 if no more rowgroups to process.
+     */
+    int acquire_next_rowgroup(int &row_group);
 
 public:
     ParquetReader(MemoryContext cxt);

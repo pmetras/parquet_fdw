@@ -2,6 +2,7 @@
 #define PARQUET_FDW_HEAP_HPP
 
 #include <algorithm>
+#include <cassert>
 #include <cstddef>
 #include <functional> 
 
@@ -45,29 +46,36 @@ public:
     ~Heap()
     {
         if (_data)
-            delete _data;
+            delete[] _data;
     }
 
-    T& operator[](int idx)
+    T& operator[](size_t idx)
     {
+        assert(idx < _size);
+        return _data[idx];
+    }
+
+    const T& operator[](size_t idx) const
+    {
+        assert(idx < _size);
         return _data[idx];
     }
 
     void init(size_t capacity, cmp_func cmp)
     {
         if (_data)
-            delete _data;
+            delete[] _data;
         _data = new T[capacity];
         _capacity = capacity;
         _cmp = cmp;
     }
 
-    size_t size()
+    size_t size() const
     {
         return _size;
     }
 
-    bool empty()
+    bool empty() const
     {
         return _size == 0;
     }
@@ -82,7 +90,7 @@ public:
      */
     void append(const T &new_value)
     {
-        /* TODO: assert _size <= _capacity */
+        assert(_size < _capacity);
         _data[_size++] = new_value;
     }
 
@@ -98,7 +106,13 @@ public:
 
     T& head()
     {
-        /* TODO: assert */
+        assert(_size > 0);
+        return _data[0];
+    }
+
+    const T& head() const
+    {
+        assert(_size > 0);
         return _data[0];
     }
 
