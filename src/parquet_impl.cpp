@@ -1,11 +1,9 @@
 /*
  * Parquet processing implementation
  */
-// basename comes from string.h on Linux,
-// but from libgen.h on other POSIX systems (see man basename)
-// dirname is always from libgen.h
-#include <libgen.h>
-#include <stdlib.h>  /* for realpath */
+#include <filesystem>
+
+namespace fs = std::filesystem;
 
 #include <sys/stat.h>
 #include <math.h>
@@ -511,43 +509,45 @@ is_valid_path_char(char c)
 static bool
 is_path_allowed(const char *path)
 {
-    char        resolved_path[MAXPGPATH];
-    char        resolved_dir[MAXPGPATH];
+    fs::path    resolved_path;
     char       *allowed_dirs;
     char       *dir;
     char       *saveptr;
 
     /* If no restrictions set, only superuser can access any path */
-    if (parquet_fdw_allowed_directories == NULL ||
+    if (parquet_fdw_allowed_directories == nullptr ||
         parquet_fdw_allowed_directories[0] == '\0')
     {
         return superuser();
     }
 
-    /* Resolve the actual path */
-    if (realpath(path, resolved_path) == NULL)
+    /* Resolve the actual path using std::filesystem::canonical */
+    try
+    {
+        resolved_path = fs::canonical(path);
+    }
+    catch (const fs::filesystem_error &)
     {
         /*
          * If the file doesn't exist yet (e.g., during validation),
          * try to resolve the parent directory
          */
-        char   *path_copy = pstrdup(path);
-        char   *parent = dirname(path_copy);
-
-        if (realpath(parent, resolved_path) == NULL)
+        try
         {
-            pfree(path_copy);
+            resolved_path = fs::canonical(fs::path(path).parent_path());
+        }
+        catch (const fs::filesystem_error &)
+        {
             return false;  /* Can't resolve path at all */
         }
-        pfree(path_copy);
     }
 
     /* Parse the comma-separated list of allowed directories */
     allowed_dirs = pstrdup(parquet_fdw_allowed_directories);
 
     for (dir = strtok_r(allowed_dirs, ",", &saveptr);
-         dir != NULL;
-         dir = strtok_r(NULL, ",", &saveptr))
+         dir != nullptr;
+         dir = strtok_r(nullptr, ",", &saveptr))
     {
         /* Skip leading whitespace */
         while (*dir == ' ')
@@ -562,15 +562,24 @@ is_path_allowed(const char *path)
             continue;
 
         /* Resolve the allowed directory path */
-        if (realpath(dir, resolved_dir) == NULL)
+        fs::path resolved_dir;
+        try
+        {
+            resolved_dir = fs::canonical(dir);
+        }
+        catch (const fs::filesystem_error &)
+        {
             continue;  /* Skip directories that don't exist */
+        }
 
         /* Check if resolved_path starts with resolved_dir */
-        size_t dir_len = strlen(resolved_dir);
-        if (strncmp(resolved_path, resolved_dir, dir_len) == 0)
+        auto resolved_str = resolved_path.string();
+        auto dir_str = resolved_dir.string();
+        if (resolved_str.compare(0, dir_str.length(), dir_str) == 0)
         {
             /* Make sure it's a proper prefix (followed by / or end of string) */
-            if (resolved_path[dir_len] == '/' || resolved_path[dir_len] == '\0')
+            if (resolved_str.length() == dir_str.length() ||
+                resolved_str[dir_str.length()] == '/')
             {
                 pfree(allowed_dirs);
                 return true;
@@ -2250,11 +2259,7 @@ parquetExplainForeignScan(ForeignScanState *node, ExplainState *es)
             appendStringInfoChar(&str, '\n');
             appendStringInfoSpaces(&str, (es->indent + 1) * 2);
 
-#ifdef _GNU_SOURCE
-        appendStringInfo(&str, "%s: ", basename(filename));
-#else
-        appendStringInfo(&str, "%s: ", basename(pstrdup(filename)));
-#endif
+        appendStringInfo(&str, "%s: ", fs::path(filename).filename().c_str());
         }
 
         foreach(lc3, rowgroups)
