@@ -318,7 +318,7 @@ Datum ParquetReader::do_cast(Datum val, const TypeInfo &typinfo)
     /* du, du cast, du cast mich... */
     PG_TRY();
     {
-        if (typinfo.castfunc != NULL)
+        if (typinfo.castfunc != nullptr)
         {
             val = FunctionCall1(typinfo.castfunc, val);
         }
@@ -551,7 +551,7 @@ Datum ParquetReader::nested_list_to_datum(arrow::ListArray *larray, int pos,
 {
     ArrayType  *res;
     Datum      *values;
-    bool       *nulls = NULL;
+    bool       *nulls = nullptr;
     int         dims[1];
     int         lbs[1];
     bool        error = false;
@@ -627,7 +627,7 @@ Datum
 ParquetReader::map_to_datum(arrow::MapArray *maparray, int pos,
                             const TypeInfo &typinfo)
 {
-	JsonbParseState *parseState = NULL;
+	JsonbParseState *parseState = nullptr;
     JsonbValue *jb;
     Datum       res;
 
@@ -639,7 +639,7 @@ ParquetReader::map_to_datum(arrow::MapArray *maparray, int pos,
     Assert(keys->length() == values->length());
     Assert(typinfo.children.size() == 2);
 
-    jb = pushJsonbValue(&parseState, WJB_BEGIN_OBJECT, NULL);
+    jb = pushJsonbValue(&parseState, WJB_BEGIN_OBJECT, nullptr);
 
     for (int i = 0; i < keys->length(); ++i)
     {
@@ -666,7 +666,7 @@ ParquetReader::map_to_datum(arrow::MapArray *maparray, int pos,
                        parseState, false);
     }
 
-    jb = pushJsonbValue(&parseState, WJB_END_OBJECT, NULL);
+    jb = pushJsonbValue(&parseState, WJB_END_OBJECT, nullptr);
     res = JsonbPGetDatum(JsonbValueToJsonb(jb));
 
     if (typinfo.need_cast)
@@ -877,7 +877,7 @@ public:
     {
         this->filename = filename;
         this->reader_id = reader_id;
-        this->coordinator = NULL;
+        this->coordinator = nullptr;
         this->initialized = false;
     }
 
@@ -1109,7 +1109,7 @@ public:
     {
         this->filename = filename;
         this->reader_id = reader_id;
-        this->coordinator = NULL;
+        this->coordinator = nullptr;
         this->initialized = false;
     }
 

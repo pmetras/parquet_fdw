@@ -56,7 +56,7 @@ exc_palloc(std::size_t size)
 	context->isReset = false;
 
 	ret = PF_MCTX_ALLOC(context, size);
-	if (unlikely(ret == NULL))
+	if (unlikely(ret == nullptr))
 		throw std::bad_alloc();
 
 	VALGRIND_MEMPOOL_ALLOC(context, ret, size);
@@ -79,7 +79,7 @@ is_extension_uuid(const arrow::DataType *arrow_type)
 {
     auto ext_type = dynamic_cast<arrow::ExtensionType *>(const_cast<arrow::DataType*>(arrow_type));
 
-    if (ext_type != NULL && ext_type->extension_name() == "arrow.uuid")
+    if (ext_type != nullptr && ext_type->extension_name() == "arrow.uuid")
     {
         auto storage = ext_type->storage_type();
 
@@ -103,7 +103,7 @@ is_extension_uuid(const arrow::DataType *arrow_type)
 bool
 is_fixed_size_uuid(const arrow::DataType *arrow_type)
 {
-    return (arrow_type != NULL && arrow_type->name() == "fixed_size_binary" && arrow_type->byte_width() == UUID_LEN);
+    return (arrow_type != nullptr && arrow_type->name() == "fixed_size_binary" && arrow_type->byte_width() == UUID_LEN);
 }
 
 
@@ -197,7 +197,7 @@ bytes_to_postgres_type(const char *bytes, Size len, const arrow::DataType *arrow
             }
             return PointerGetDatum(cstring_to_text_with_len(bytes, len));
         default:
-            return PointerGetDatum(NULL);
+            return PointerGetDatum(nullptr);
     }
 }
 
@@ -326,7 +326,7 @@ string_to_int32(const char *s)
 	 * Some versions of strtol treat the empty string as an error, but some
 	 * seem not to.  Make an explicit test to be sure we catch it.
 	 */
-	if (s == NULL)
+	if (s == nullptr)
 		elog(ERROR, "NULL pointer");
 	if (*s == 0)
 		ereport(ERROR,

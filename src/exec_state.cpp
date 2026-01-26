@@ -125,7 +125,7 @@ public:
 
     void init_coord()
     {
-        coord->init_single(NULL, 0);
+        coord->init_single(nullptr, 0);
     }
 };
 
@@ -584,7 +584,7 @@ private:
         }
 
         /* Reopen the reader and update timestamp */
-        gettimeofday(&tv, NULL);
+        gettimeofday(&tv, nullptr);
         ts_active[reader->id()] = tv.tv_sec*1000LL + tv.tv_usec/1000;
         reader->open();
         num_active_readers++;
