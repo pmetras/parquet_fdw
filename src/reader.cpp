@@ -367,14 +367,14 @@ Datum ParquetReader::read_primitive_type(arrow::Array *array,
     {
         case arrow::Type::BOOL:
         {
-            arrow::BooleanArray *boolarray = (arrow::BooleanArray *) array;
+            auto *boolarray = static_cast<arrow::BooleanArray *>(array);
 
             res = BoolGetDatum(boolarray->Value(i));
             break;
         }
         case arrow::Type::INT8:
         {
-            arrow::Int8Array *intarray = (arrow::Int8Array *) array;
+            auto *intarray = static_cast<arrow::Int8Array *>(array);
             int value = intarray->Value(i);
 
             res = Int8GetDatum(value);
@@ -382,7 +382,7 @@ Datum ParquetReader::read_primitive_type(arrow::Array *array,
         }
         case arrow::Type::INT16:
         {
-            arrow::Int16Array *intarray = (arrow::Int16Array *) array;
+            auto *intarray = static_cast<arrow::Int16Array *>(array);
             int value = intarray->Value(i);
 
             res = Int16GetDatum(value);
@@ -390,7 +390,7 @@ Datum ParquetReader::read_primitive_type(arrow::Array *array,
         }
         case arrow::Type::INT32:
         {
-            arrow::Int32Array *intarray = (arrow::Int32Array *) array;
+            auto *intarray = static_cast<arrow::Int32Array *>(array);
             int value = intarray->Value(i);
 
             res = Int32GetDatum(value);
@@ -398,7 +398,7 @@ Datum ParquetReader::read_primitive_type(arrow::Array *array,
         }
         case arrow::Type::INT64:
         {
-            arrow::Int64Array *intarray = (arrow::Int64Array *) array;
+            auto *intarray = static_cast<arrow::Int64Array *>(array);
             int64 value = intarray->Value(i);
 
             res = Int64GetDatum(value);
@@ -406,7 +406,7 @@ Datum ParquetReader::read_primitive_type(arrow::Array *array,
         }
         case arrow::Type::FLOAT:
         {
-            arrow::FloatArray *farray = (arrow::FloatArray *) array;
+            auto *farray = static_cast<arrow::FloatArray *>(array);
             float value = farray->Value(i);
 
             res = Float4GetDatum(value);
@@ -414,7 +414,7 @@ Datum ParquetReader::read_primitive_type(arrow::Array *array,
         }
         case arrow::Type::DOUBLE:
         {
-            arrow::DoubleArray *darray = (arrow::DoubleArray *) array;
+            auto *darray = static_cast<arrow::DoubleArray *>(array);
             double value = darray->Value(i);
 
             res = Float8GetDatum(value);
@@ -423,7 +423,7 @@ Datum ParquetReader::read_primitive_type(arrow::Array *array,
         case arrow::Type::STRING:
         case arrow::Type::BINARY:
         {
-            arrow::BinaryArray *binarray = (arrow::BinaryArray *) array;
+            auto *binarray = static_cast<arrow::BinaryArray *>(array);
 
             int32_t vallen = 0;
             const char *value = reinterpret_cast<const char*>(binarray->GetValue(i, &vallen));
@@ -441,8 +441,8 @@ Datum ParquetReader::read_primitive_type(arrow::Array *array,
         {
             /* TODO: deal with timezones */
             TimestampTz ts;
-            arrow::TimestampArray *tsarray = (arrow::TimestampArray *) array;
-            auto tstype = (arrow::TimestampType *) array->type().get();
+            auto *tsarray = static_cast<arrow::TimestampArray *>(array);
+            auto *tstype = static_cast<arrow::TimestampType *>(array->type().get());
 
             to_postgres_timestamp(tstype, tsarray->Value(i), ts);
             res = TimestampGetDatum(ts);
@@ -450,7 +450,7 @@ Datum ParquetReader::read_primitive_type(arrow::Array *array,
         }
         case arrow::Type::DATE32:
         {
-            arrow::Date32Array *tsarray = (arrow::Date32Array *) array;
+            auto *tsarray = static_cast<arrow::Date32Array *>(array);
             int32 d = tsarray->Value(i);
 
             /*
@@ -499,7 +499,7 @@ Datum ParquetReader::read_primitive_type(arrow::Array *array,
         }
         case arrow::Type::EXTENSION:
         {
-            arrow::BinaryArray *binarray = (arrow::BinaryArray *) array;
+            auto *binarray = static_cast<arrow::BinaryArray *>(array);
 
             int32_t vallen = 0;
             const char *value = reinterpret_cast<const char*>(binarray->GetValue(i, &vallen));
@@ -1043,7 +1043,7 @@ public:
                 {
                     case arrow::Type::LIST:
                     {
-                        arrow::ListArray   *larray = (arrow::ListArray *) array;
+                        auto *larray = static_cast<arrow::ListArray *>(array);
 
                         slot->tts_values[attr] =
                             this->nested_list_to_datum(larray, chunkInfo.pos,
@@ -1052,7 +1052,7 @@ public:
                     }
                     case arrow::Type::MAP:
                     {
-                        arrow::MapArray *maparray = (arrow::MapArray*) array;
+                        auto *maparray = static_cast<arrow::MapArray *>(array);
                         Datum       jsonb = this->map_to_datum(maparray, chunkInfo.pos, typinfo);
 
                         /*
@@ -1261,52 +1261,52 @@ public:
                      */
                     case arrow::Type::BOOL:
                         {
-                            arrow::BooleanArray *boolarray = (arrow::BooleanArray *) array;
-                            ((bool *) data)[row] = boolarray->Value(row);
+                            auto *boolarray = static_cast<arrow::BooleanArray *>(array);
+                            static_cast<bool *>(data)[row] = boolarray->Value(row);
                             break;
                         }
                     case arrow::Type::INT8:
                         {
-                            arrow::Int8Array *intarray = (arrow::Int8Array *) array;
-                            ((int8 *) data)[row] = intarray->Value(row);
+                            auto *intarray = static_cast<arrow::Int8Array *>(array);
+                            static_cast<int8 *>(data)[row] = intarray->Value(row);
                             break;
                         }
                     case arrow::Type::INT16:
                         {
-                            arrow::Int16Array *intarray = (arrow::Int16Array *) array;
-                            ((int16 *) data)[row] = intarray->Value(row);
+                            auto *intarray = static_cast<arrow::Int16Array *>(array);
+                            static_cast<int16 *>(data)[row] = intarray->Value(row);
                             break;
                         }
                     case arrow::Type::INT32:
                         {
-                            arrow::Int32Array *intarray = (arrow::Int32Array *) array;
-                            ((int32 *) data)[row] = intarray->Value(row);
+                            auto *intarray = static_cast<arrow::Int32Array *>(array);
+                            static_cast<int32 *>(data)[row] = intarray->Value(row);
                             break;
                         }
                     case arrow::Type::FLOAT:
                         {
-                            arrow::FloatArray *farray = (arrow::FloatArray *) array;
-                            ((float *) data)[row] = farray->Value(row);
+                            auto *farray = static_cast<arrow::FloatArray *>(array);
+                            static_cast<float *>(data)[row] = farray->Value(row);
                             break;
                         }
                     case arrow::Type::DATE32:
                         {
-                            arrow::Date32Array *tsarray = (arrow::Date32Array *) array;
-                            ((int *) data)[row] = tsarray->Value(row);
+                            auto *tsarray = static_cast<arrow::Date32Array *>(array);
+                            static_cast<int *>(data)[row] = tsarray->Value(row);
                             break;
                         }
 
                     case arrow::Type::LIST:
                         {
-                            auto larray = (arrow::ListArray *) array;
+                            auto *larray = static_cast<arrow::ListArray *>(array);
 
-                            ((Datum *) data)[row] =
+                            static_cast<Datum *>(data)[row] =
                                 this->nested_list_to_datum(larray, j, typinfo);
                             break;
                         }
                     case arrow::Type::MAP:
                         {
-                            arrow::MapArray* maparray = (arrow::MapArray*) array;
+                            auto *maparray = static_cast<arrow::MapArray *>(array);
                             Datum       jsonb = this->map_to_datum(maparray, j, typinfo);
 
                             /*
@@ -1320,7 +1320,7 @@ public:
                             memcpy(jsonb_val, DatumGetPointer(jsonb), VARSIZE_ANY(jsonb));
                             pfree(DatumGetPointer(jsonb));
 
-                            ((Datum *) data)[row] = PointerGetDatum(jsonb_val);
+                            static_cast<Datum *>(data)[row] = PointerGetDatum(jsonb_val);
 
                             break;
                         }
@@ -1329,7 +1329,7 @@ public:
                          * For larger types we copy already converted into
                          * Datum values.
                          */
-                        ((Datum *) data)[row] =
+                        static_cast<Datum *>(data)[row] =
                             this->read_primitive_type(array, typinfo, j);
                 }
                 this->column_nulls[col][row] = false;
@@ -1385,19 +1385,19 @@ public:
                 switch(typinfo.arrow.type_id)
                 {
                     case arrow::Type::BOOL:
-                        slot->tts_values[attr] = BoolGetDatum(((bool *) data)[this->row]);
+                        slot->tts_values[attr] = BoolGetDatum(static_cast<bool *>(data)[this->row]);
                         break;
                     case arrow::Type::INT8:
-                        slot->tts_values[attr] = Int8GetDatum(((int8 *) data)[this->row]);
+                        slot->tts_values[attr] = Int8GetDatum(static_cast<int8 *>(data)[this->row]);
                         break;
                     case arrow::Type::INT16:
-                        slot->tts_values[attr] = Int16GetDatum(((int16 *) data)[this->row]);
+                        slot->tts_values[attr] = Int16GetDatum(static_cast<int16 *>(data)[this->row]);
                         break;
                     case arrow::Type::INT32:
-                        slot->tts_values[attr] = Int32GetDatum(((int32 *) data)[this->row]);
+                        slot->tts_values[attr] = Int32GetDatum(static_cast<int32 *>(data)[this->row]);
                         break;
                     case arrow::Type::FLOAT:
-                        slot->tts_values[attr] = Float4GetDatum(((float *) data)[this->row]);
+                        slot->tts_values[attr] = Float4GetDatum(static_cast<float *>(data)[this->row]);
                         break;
                     case arrow::Type::DATE32:
                         {
@@ -1406,13 +1406,13 @@ public:
                              * Parquet is using) starts with 1970-01-01. So we need to do
                              * simple calculations here.
                              */
-                            int dt = ((int *) data)[this->row]
+                            int dt = static_cast<int *>(data)[this->row]
                                 + (UNIX_EPOCH_JDATE - POSTGRES_EPOCH_JDATE);
                             slot->tts_values[attr] = DateADTGetDatum(dt);
                         }
                         break;
                     default:
-                        slot->tts_values[attr] = ((Datum *) data)[this->row];
+                        slot->tts_values[attr] = static_cast<Datum *>(data)[this->row];
                         need_cast = false;
                 }
 
