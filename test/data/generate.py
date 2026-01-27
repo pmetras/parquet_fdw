@@ -174,3 +174,77 @@ uuid_table = pa.table({
 
 with pq.ParquetWriter('simple/example_uuid.parquet', uuid_table.schema) as writer:
     writer.write_table(uuid_table)
+
+# Hive-partitioned test data
+# This creates a directory structure like:
+#   hive/basic/year=2023/month=1/data.parquet
+#   hive/basic/year=2023/month=2/data.parquet
+#   hive/basic/year=2024/month=1/data.parquet
+#   hive/basic/year=2024/month=2/data.parquet
+import os
+
+hive_basic_schema = pa.schema([
+    pa.field('id', pa.int64()),
+    pa.field('amount', pa.float64()),
+    pa.field('name', pa.string()),
+])
+
+# Create hive directory structure
+hive_partitions = [
+    ('2023', '1', [
+        {'id': 1, 'amount': 100.0, 'name': 'Alice'},
+        {'id': 2, 'amount': 200.0, 'name': 'Bob'},
+    ]),
+    ('2023', '2', [
+        {'id': 3, 'amount': 150.0, 'name': 'Charlie'},
+        {'id': 4, 'amount': 250.0, 'name': 'Diana'},
+    ]),
+    ('2024', '1', [
+        {'id': 5, 'amount': 175.0, 'name': 'Eve'},
+        {'id': 6, 'amount': 225.0, 'name': 'Frank'},
+    ]),
+    ('2024', '2', [
+        {'id': 7, 'amount': 125.0, 'name': 'Grace'},
+        {'id': 8, 'amount': 275.0, 'name': 'Henry'},
+    ]),
+]
+
+for year, month, data in hive_partitions:
+    dir_path = f'hive/basic/year={year}/month={month}'
+    os.makedirs(dir_path, exist_ok=True)
+
+    df = pd.DataFrame(data)
+    table = pa.Table.from_pandas(df, schema=hive_basic_schema, preserve_index=False)
+
+    with pq.ParquetWriter(f'{dir_path}/data.parquet', hive_basic_schema) as writer:
+        writer.write_table(table)
+
+# Hive partitioned data with region text partition
+# This creates: hive/region/region=US/data.parquet, hive/region/region=EU/data.parquet
+hive_region_schema = pa.schema([
+    pa.field('id', pa.int64()),
+    pa.field('sales', pa.float64()),
+])
+
+region_partitions = [
+    ('US', [
+        {'id': 1, 'sales': 1000.0},
+        {'id': 2, 'sales': 1500.0},
+    ]),
+    ('EU', [
+        {'id': 3, 'sales': 2000.0},
+        {'id': 4, 'sales': 2500.0},
+    ]),
+]
+
+for region, data in region_partitions:
+    dir_path = f'hive/region/region={region}'
+    os.makedirs(dir_path, exist_ok=True)
+
+    df = pd.DataFrame(data)
+    table = pa.Table.from_pandas(df, schema=hive_region_schema, preserve_index=False)
+
+    with pq.ParquetWriter(f'{dir_path}/data.parquet', hive_region_schema) as writer:
+        writer.write_table(table)
+
+print("Generated Hive partitioned test data in hive/")

@@ -840,6 +840,70 @@ void ParquetReader::set_coordinator(ParallelCoordinator *coord)
     this->coordinator = coord;
 }
 
+/*
+ * set_partition_values
+ *      Set the partition values for this reader, extracted from the file path.
+ *      This is called when hive_partitioning is enabled to provide values for
+ *      virtual columns that are not in the Parquet file but come from the path.
+ */
+void ParquetReader::set_partition_values(const std::vector<HivePartitionValue> &partitions,
+                                         TupleDesc tupleDesc,
+                                         const std::set<int> &attrs_used)
+{
+    this->partition_columns.clear();
+    this->partition_columns.resize(tupleDesc->natts);
+
+    for (int i = 0; i < tupleDesc->natts; i++)
+    {
+        this->partition_columns[i].attnum = -1;  /* not a partition column by default */
+    }
+
+    /*
+     * For each partition value from the path, check if there's a matching
+     * column in the tuple descriptor that's not in the Parquet file.
+     */
+    for (const auto &pv : partitions)
+    {
+        char pg_colname[NAMEDATALEN];
+
+        /* Find matching column in tuple descriptor */
+        for (int i = 0; i < tupleDesc->natts; i++)
+        {
+            AttrNumber attnum = i + 1 - FirstLowInvalidHeapAttributeNumber;
+
+            /* Skip columns not used in the query */
+            if (attrs_used.find(attnum) == attrs_used.end())
+                continue;
+
+            /* Skip columns that already have a mapping (from Parquet file) */
+            if (this->map[i] >= 0)
+                continue;
+
+            tolowercase(NameStr(TupleDescAttr(tupleDesc, i)->attname), pg_colname);
+
+            /* Check if this column name matches the partition key */
+            if (pv.key == pg_colname)
+            {
+                Oid col_type = TupleDescAttr(tupleDesc, i)->atttypid;
+
+                /* Convert the partition value to the column's type */
+                bool isnull;
+                Datum value = string_to_datum(pv.value.c_str(), col_type, &isnull);
+
+                this->partition_columns[i].attnum = i;
+                this->partition_columns[i].pg_type = col_type;
+                this->partition_columns[i].value = value;
+                this->partition_columns[i].isnull = isnull;
+                this->partition_columns[i].key = pv.key;
+
+                elog(DEBUG1, "parquet_fdw: mapped partition column %s=%s to attribute %d",
+                     pv.key.c_str(), pv.value.c_str(), i);
+                break;
+            }
+        }
+    }
+}
+
 int ParquetReader::acquire_next_rowgroup(int &row_group)
 {
     /*
@@ -1085,7 +1149,20 @@ public:
             }
             else
             {
-                slot->tts_isnull[attr] = true;
+                /*
+                 * Check if this is a virtual partition column (from Hive path).
+                 * If so, use the partition value; otherwise mark as NULL.
+                 */
+                if (static_cast<size_t>(attr) < this->partition_columns.size() &&
+                    this->partition_columns[attr].attnum >= 0)
+                {
+                    slot->tts_values[attr] = this->partition_columns[attr].value;
+                    slot->tts_isnull[attr] = this->partition_columns[attr].isnull;
+                }
+                else
+                {
+                    slot->tts_isnull[attr] = true;
+                }
             }
         }
     }
@@ -1410,7 +1487,20 @@ public:
             }
             else
             {
-                slot->tts_isnull[attr] = true;
+                /*
+                 * Check if this is a virtual partition column (from Hive path).
+                 * If so, use the partition value; otherwise mark as NULL.
+                 */
+                if (static_cast<size_t>(attr) < this->partition_columns.size() &&
+                    this->partition_columns[attr].attnum >= 0)
+                {
+                    slot->tts_values[attr] = this->partition_columns[attr].value;
+                    slot->tts_isnull[attr] = this->partition_columns[attr].isnull;
+                }
+                else
+                {
+                    slot->tts_isnull[attr] = true;
+                }
             }
         }
 

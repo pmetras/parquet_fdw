@@ -28,6 +28,7 @@ extern "C"
 #include "access/nbtree.h"
 #include "access/reloptions.h"
 #include "access/sysattr.h"
+#include "catalog/pg_collation_d.h"
 #include "catalog/pg_foreign_table.h"
 #include "catalog/pg_type.h"
 #include "commands/defrem.h"
@@ -134,7 +135,116 @@ struct ParquetFdwPlanState
     List       *rowgroups;      /* List of Lists (per filename) */
     uint64      matched_rows;
     ReaderType  type;
+
+    /* Hive partitioning support */
+    bool        hive_partitioning;          /* Enable Hive-style partition extraction */
+    List       *partition_columns;          /* Explicit partition column names (or NIL for auto) */
+    char       *partition_map;              /* Partition map string (column-to-partition mapping) */
+    std::vector<HivePartitionMapping> *partition_mappings;  /* Parsed partition mappings */
+    std::vector<std::vector<HivePartitionValue>> *file_partition_values;  /* Per-file partition values */
 };
+
+/*
+ * partition_matches_filter
+ *      Check if a partition value matches a single filter.
+ *      Returns true if the filter is satisfied or doesn't apply.
+ */
+static bool
+partition_matches_filter(const HivePartitionValue &pv, const RowGroupFilter &filter,
+                         TupleDesc tupleDesc)
+{
+    /* Check if this filter applies to this partition key */
+    AttrNumber attnum = filter.attnum;
+    if (attnum < 1 || attnum > tupleDesc->natts)
+        return true;  /* filter doesn't apply */
+
+    Form_pg_attribute attr = TupleDescAttr(tupleDesc, attnum - 1);
+    char colname[NAMEDATALEN];
+    tolowercase(NameStr(attr->attname), colname);
+
+    if (pv.key != colname)
+        return true;  /* filter is for a different column */
+
+    /* Skip NULL partition values - can't prune on them */
+    if (pv.isnull)
+        return true;
+
+    /* Convert partition value to the column type for comparison */
+    bool isnull;
+    Datum partition_datum = string_to_datum(pv.value.c_str(), attr->atttypid, &isnull);
+    if (isnull)
+        return true;
+
+    /* Get the filter constant value */
+    if (filter.value->constisnull)
+        return true;
+
+    Datum filter_datum = filter.value->constvalue;
+
+    /* Find comparison function */
+    TypeCacheEntry *tce = lookup_type_cache(attr->atttypid, TYPECACHE_CMP_PROC_FINFO);
+    if (!OidIsValid(tce->cmp_proc))
+        return true;  /* can't compare, don't prune */
+
+    /* Get collation from the filter constant (needed for text comparisons) */
+    Oid collation = filter.value->constcollid;
+    if (!OidIsValid(collation))
+        collation = attr->attcollation;
+    if (!OidIsValid(collation))
+        collation = DEFAULT_COLLATION_OID;
+
+    /* Perform comparison with proper collation */
+    int cmp = DatumGetInt32(FunctionCall2Coll(&tce->cmp_proc_finfo, collation, partition_datum, filter_datum));
+
+    /* Check if comparison satisfies the filter strategy */
+    switch (filter.strategy)
+    {
+        case BTLessStrategyNumber:
+            return cmp < 0;
+        case BTLessEqualStrategyNumber:
+            return cmp <= 0;
+        case BTEqualStrategyNumber:
+            return cmp == 0;
+        case BTGreaterEqualStrategyNumber:
+            return cmp >= 0;
+        case BTGreaterStrategyNumber:
+            return cmp > 0;
+        default:
+            return true;  /* unknown strategy, don't prune */
+    }
+}
+
+/*
+ * file_matches_partition_filters
+ *      Check if a file's partition values satisfy all applicable filters.
+ *      Returns true if the file should be included (passes all filters).
+ */
+static bool
+file_matches_partition_filters(const char *filename,
+                               const std::list<RowGroupFilter> &filters,
+                               TupleDesc tupleDesc)
+{
+    /* Extract partition values from the file path */
+    auto partitions = extract_hive_partitions(filename);
+    if (partitions.empty())
+        return true;  /* no partitions to filter on */
+
+    /* Check each filter against each partition value */
+    for (const auto &filter : filters)
+    {
+        for (const auto &pv : partitions)
+        {
+            if (!partition_matches_filter(pv, filter, tupleDesc))
+            {
+                elog(DEBUG1, "parquet_fdw: file %s pruned by partition %s=%s",
+                     filename, pv.key.c_str(), pv.value.c_str());
+                return false;
+            }
+        }
+    }
+
+    return true;
+}
 
 static int
 get_strategy(Oid type, Oid opno, Oid am)
@@ -1343,6 +1453,11 @@ get_table_options(Oid relid, ParquetFdwPlanState *fdw_private)
     fdw_private->use_threads = false;
     fdw_private->max_open_files = 0;
     fdw_private->files_in_order = false;
+    fdw_private->hive_partitioning = false;
+    fdw_private->partition_columns = NIL;
+    fdw_private->partition_map = nullptr;
+    fdw_private->partition_mappings = nullptr;
+    fdw_private->file_partition_values = nullptr;
     table = GetForeignTable(relid);
 
     // When we get there, we are sure that only one of filename, tables_map or
@@ -1404,12 +1519,37 @@ get_table_options(Oid relid, ParquetFdwPlanState *fdw_private)
         {
             fdw_private->files_in_order = defGetBoolean(def);
         }
+        else if (strcmp(def->defname, "hive_partitioning") == 0)
+        {
+            fdw_private->hive_partitioning = defGetBoolean(def);
+        }
+        else if (strcmp(def->defname, "partition_columns") == 0)
+        {
+            fdw_private->partition_columns =
+                parse_attributes_list(defGetString(def), relid);
+        }
+        else if (strcmp(def->defname, "partition_map") == 0)
+        {
+            fdw_private->partition_map = pstrdup(defGetString(def));
+        }
         else
             elog(ERROR, "unknown option '%s'", def->defname);
     }
 
     if (funcname)
         fdw_private->filenames = get_filenames_from_userfunc(funcname, funcarg);
+
+    /* Parse partition_map if provided */
+    if (fdw_private->hive_partitioning && fdw_private->partition_map)
+    {
+        try {
+            fdw_private->partition_mappings = new std::vector<HivePartitionMapping>(
+                parse_partition_map(fdw_private->partition_map));
+        }
+        catch (const std::exception &e) {
+            elog(ERROR, "parquet_fdw: %s", e.what());
+        }
+    }
 }
 
 extern "C" void
@@ -1451,6 +1591,19 @@ parquetGetForeignRelSize(PlannerInfo *root,
     foreach (lc, filenames_orig)
     {
         char *filename = strVal(lfirst(lc));
+
+        /*
+         * If Hive partitioning is enabled, first check if the file's partition
+         * values satisfy the query filters. This is a cheap check that can
+         * eliminate entire files without opening them.
+         */
+        if (fdw_private->hive_partitioning &&
+            !file_matches_partition_filters(filename, filters, tupleDesc))
+        {
+            /* File pruned by partition filter */
+            continue;
+        }
+
         List *rowgroups = extract_rowgroups_list(filename, tupleDesc, filters,
                                                  &matched_rows, &total_rows);
 
@@ -1867,6 +2020,7 @@ parquetGetForeignPlan(PlannerInfo * /* root */,
     params = lappend(params, makeInteger(fdw_private->type));
     params = lappend(params, makeInteger(fdw_private->max_open_files));
     params = lappend(params, fdw_private->rowgroups);
+    params = lappend(params, makeInteger(fdw_private->hive_partitioning));
 
 	/* Create the ForeignScan node */
 	return make_foreignscan(tlist,
@@ -1896,6 +2050,7 @@ parquetBeginForeignScan(ForeignScanState *node, int /* eflags */)
     List           *attrs_sorted = NIL;
     bool            use_mmap = false;
     bool            use_threads = false;
+    bool            hive_partitioning = false;
     int             i = 0;
     ReaderType      reader_type = RT_SINGLE;
     int             max_open_files = 0;
@@ -1931,6 +2086,9 @@ parquetBeginForeignScan(ForeignScanState *node, int /* eflags */)
                 break;
             case 7:
                 rowgroups_list = (List *) lfirst(lc);
+                break;
+            case 8:
+                hive_partitioning = (bool) intVal(lfirst(lc));
                 break;
         }
         ++i;
@@ -1994,6 +2152,14 @@ parquetBeginForeignScan(ForeignScanState *node, int /* eflags */)
             List *rowgroups = (List *) lfirst(lc2);
 
             festate->add_file(filename, rowgroups);
+
+            /* Extract and set Hive partition values if enabled */
+            if (hive_partitioning)
+            {
+                auto partitions = extract_hive_partitions(filename);
+                if (!partitions.empty())
+                    festate->set_partition_values(partitions);
+            }
         }
     }
     catch(std::exception &e)
@@ -2226,7 +2392,7 @@ parquetExplainForeignScan(ForeignScanState *node, ExplainState *es)
 	fdw_private = ((ForeignScan *) node->ss.ps.plan)->fdw_private;
     filenames = (List *) linitial(fdw_private);
     reader_type = (ReaderType) intVal(list_nth(fdw_private, 5));
-    rowgroups_list = (List *) llast(fdw_private);
+    rowgroups_list = (List *) list_nth(fdw_private, 7);
 
     switch (reader_type)
     {
@@ -2354,9 +2520,15 @@ parquetShutdownForeignScan(ForeignScanState * /* node */)
 /*
  * Add a CREATE FOREIGN TABLE statement command for the given table name
  * to the list of tables creation for the foreign schema.
+ *
+ * If hive_partitioning is true, partition columns from the file path will be
+ * added to the table schema and hive_partitioning option will be set.
+ *
+ * If partition_map is non-NULL, it will be added as an option (for mapped columns).
  */
 static List *
-add_create_foreign_table(List *cmds, ImportForeignSchemaStmt *stmt, char *tablename, char *filenames)
+add_create_foreign_table(List *cmds, ImportForeignSchemaStmt *stmt, char *tablename,
+                         char *filenames, bool hive_partitioning, const char *partition_map)
 {
     ListCell   *lc;
     List       *fields;
@@ -2408,44 +2580,65 @@ add_create_foreign_table(List *cmds, ImportForeignSchemaStmt *stmt, char *tablen
 
     if (fields == NIL)
         elog(ERROR, "parquet_fdw: one Parquet file at least must be present into %s to extract columns of remote table", path);
-    
-    // We should check that fields in all Parquet files are identical.
-    // Following code is unreliable...
-/*
-    for_each_from(lc, paths, 1)
+
+    /*
+     * If Hive partitioning is enabled, extract partition columns from the file
+     * path and add them to the fields list (unless a partition_map is provided,
+     * which means the columns are already in the Parquet file).
+     */
+    if (hive_partitioning && !partition_map)
     {
-        List *fields2 = extract_parquet_fields(strVal(lfirst(lc)));
-
-        ListCell *fc = (ListCell *) linitial(fields);
-        ListCell *fc2 = (ListCell *) linitial(fields2);
-        FieldInfo *fi = (FieldInfo *) fc;
-        FieldInfo *fi2 = (FieldInfo *) fc2;
-        while (fc != NULL && fc2 != NULL)
+        auto partitions = extract_hive_partitions(path);
+        for (const auto &pv : partitions)
         {
-            if (fi->oid != fi2->oid || strcmp(fi->name, fi2->name) != 0)
-                elog(ERROR,
-                    "parquet_fdw: fields of file %s are different from those of other files (%s vs %s)",
-                    strVal(lfirst(lc)), fi->name, fi2->name);
+            /* Check if this partition key already exists in fields */
+            bool exists = false;
+            foreach(lc, fields)
+            {
+                FieldInfo *fi = (FieldInfo *) lfirst(lc);
+                if (strcasecmp(fi->name, pv.key.c_str()) == 0)
+                {
+                    exists = true;
+                    break;
+                }
+            }
 
-            fc = lnext(fields, fc);
-            fc2 = lnext(fields2, fc2);
-            fi = (FieldInfo *) fc;
-            fi2 = (FieldInfo *) fc2;
+            if (!exists)
+            {
+                /* Add as a virtual partition column */
+                FieldInfo *fi = (FieldInfo *) palloc(sizeof(FieldInfo));
+                strncpy(fi->name, pv.key.c_str(), NAMEDATALEN - 1);
+                fi->name[NAMEDATALEN - 1] = '\0';
+                fi->oid = infer_partition_type(pv.value.c_str());
+                fields = lappend(fields, fi);
+
+                elog(DEBUG1, "parquet_fdw: added virtual partition column '%s' to table '%s'",
+                     pv.key.c_str(), tablename);
+            }
         }
-        if (fc != NULL || fc2 != NULL)
-            elog(ERROR,
-                "parquet_fdw: fields of file %s are different from those of other files (%s vs %s)",
-                strVal(lfirst(lc)),
-                fc != NULL ? fi->name : "NULL",
-                fc2 != NULL ? fi2->name: "NULL");
-        pfree(fields2);
     }
-*/
+
+    /*
+     * Build modified options list that includes hive_partitioning and partition_map
+     */
+    List *modified_options = list_copy(stmt->options);
+    if (hive_partitioning)
+    {
+        modified_options = lappend(modified_options,
+                                   makeDefElem(pstrdup("hive_partitioning"),
+                                               (Node *) makeString(pstrdup("true")), -1));
+    }
+    if (partition_map)
+    {
+        modified_options = lappend(modified_options,
+                                   makeDefElem(pstrdup("partition_map"),
+                                               (Node *) makeString(pstrdup(partition_map)), -1));
+    }
 
     // We can now create the CREATE FOREIGN TABLE query...
     query = create_foreign_table_query(tablename, stmt->local_schema,
                                         stmt->server_name, &filenames, 1,
-                                        fields, stmt->options);
+                                        fields, modified_options);
 
     pfree(fields);
     
@@ -2461,8 +2654,11 @@ parquetImportForeignSchema(ImportForeignSchemaStmt *stmt, Oid /* serverOid */)
     List           *cmds = NIL;
     List           *tables = NIL;
     ListCell       *lc;
+    bool            hive_partitioning = false;
+    const char     *partition_map = nullptr;
+    const char     *tables_partition_map = nullptr;
 
-    // Get options to find tables_map and table names.
+    // Get options to find tables_map, hive_partitioning, etc.
     foreach(lc, stmt->options)
     {
         DefElem *def = (DefElem *) lfirst(lc);
@@ -2470,7 +2666,18 @@ parquetImportForeignSchema(ImportForeignSchemaStmt *stmt, Oid /* serverOid */)
         if (strcmp(def->defname, "tables_map") == 0)
         {
             tables = parse_tables_map(defGetString(def));
-            break;
+        }
+        else if (strcmp(def->defname, "hive_partitioning") == 0)
+        {
+            hive_partitioning = defGetBoolean(def);
+        }
+        else if (strcmp(def->defname, "partition_map") == 0)
+        {
+            partition_map = defGetString(def);
+        }
+        else if (strcmp(def->defname, "tables_partition_map") == 0)
+        {
+            tables_partition_map = defGetString(def);
         }
     }
 
@@ -2525,7 +2732,8 @@ parquetImportForeignSchema(ImportForeignSchemaStmt *stmt, Oid /* serverOid */)
                 */
                 *ext = '\0';
                 
-                cmds = add_create_foreign_table(cmds, stmt, filename, path);
+                cmds = add_create_foreign_table(cmds, stmt, filename, path,
+                                                hive_partitioning, partition_map);
 
                 pfree(filename);
                 pfree(path);
@@ -2546,7 +2754,38 @@ parquetImportForeignSchema(ImportForeignSchemaStmt *stmt, Oid /* serverOid */)
             // so that globbing patterns are evaluated at query execution and
             // not when the table is created.
 
-            cmds = add_create_foreign_table(cmds, stmt, tablename, filenames);
+            /*
+             * Check if this table has a specific partition_map in tables_partition_map.
+             * Format: "table1:key={FUNC(col)} table2:key={FUNC(col)}"
+             */
+            const char *table_partition_map = partition_map;  /* default to global partition_map */
+            if (tables_partition_map)
+            {
+                /* Parse tables_partition_map to find this table's mapping */
+                std::string map_str(tables_partition_map);
+                std::string table_prefix = std::string(tablename) + ":";
+                size_t pos = 0;
+
+                while (pos < map_str.length())
+                {
+                    size_t next_space = map_str.find(' ', pos);
+                    if (next_space == std::string::npos)
+                        next_space = map_str.length();
+
+                    std::string entry = map_str.substr(pos, next_space - pos);
+                    if (entry.compare(0, table_prefix.length(), table_prefix) == 0)
+                    {
+                        /* Found this table's mapping */
+                        std::string mapping = entry.substr(table_prefix.length());
+                        table_partition_map = pstrdup(mapping.c_str());
+                        break;
+                    }
+                    pos = next_space + 1;
+                }
+            }
+
+            cmds = add_create_foreign_table(cmds, stmt, tablename, filenames,
+                                            hive_partitioning, table_partition_map);
         }
     }
     list_free(tables);
@@ -2709,6 +2948,34 @@ parquet_fdw_validator_impl(PG_FUNCTION_ARGS)
         {
             /* Check that bool value is valid */
 			(void) defGetBoolean(def);
+        }
+        else if (strcmp(def->defname, "hive_partitioning") == 0)
+        {
+            /* Check that bool value is valid */
+            (void) defGetBoolean(def);
+        }
+        else if (strcmp(def->defname, "partition_columns") == 0)
+        {
+            /* Validated at query time when relid is available */
+            ;
+        }
+        else if (strcmp(def->defname, "partition_map") == 0)
+        {
+            /* Validate partition_map syntax */
+            const char *map_str = defGetString(def);
+            try {
+                auto mappings = parse_partition_map(map_str);
+                if (mappings.empty() && map_str && *map_str)
+                    ereport(ERROR,
+                            (errcode(ERRCODE_FDW_INVALID_OPTION_NAME),
+                             errmsg("parquet_fdw: invalid partition_map syntax: \"%s\"",
+                                    map_str)));
+            }
+            catch (const std::exception &e) {
+                ereport(ERROR,
+                        (errcode(ERRCODE_FDW_INVALID_OPTION_NAME),
+                         errmsg("parquet_fdw: %s", e.what())));
+            }
         }
         else
         {

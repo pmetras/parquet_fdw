@@ -80,7 +80,7 @@ public:
 
     ~SingleFileExecutionState() = default;
 
-    bool next(TupleTableSlot *slot, bool fake)
+    bool next(TupleTableSlot *slot, bool fake) override
     {
         ReadStatus res;
 
@@ -90,12 +90,12 @@ public:
         return res == RS_SUCCESS;
     }
 
-    void rescan(void)
+    void rescan(void) override
     {
         reader->rescan();
     }
 
-    void add_file(const char *filename, List *rowgroups)
+    void add_file(const char *filename, List *rowgroups) override
     {
         ListCell           *lc;
         std::vector<int>    rg;
@@ -110,7 +110,13 @@ public:
         reader->create_column_mapping(tuple_desc, attrs_used);
     }
 
-    void set_coordinator(ParallelCoordinator *new_coord)
+    void set_partition_values(const std::vector<HivePartitionValue> &partitions) override
+    {
+        if (reader)
+            reader->set_partition_values(partitions, tuple_desc, attrs_used);
+    }
+
+    void set_coordinator(ParallelCoordinator *new_coord) override
     {
         this->coord = new_coord;
 
@@ -118,12 +124,12 @@ public:
             reader->set_coordinator(new_coord);
     }
 
-    Size estimate_coord_size()
+    Size estimate_coord_size() override
     {
         return sizeof(ParallelCoordinator);
     }
 
-    void init_coord()
+    void init_coord() override
     {
         coord->init_single(nullptr, 0);
     }
@@ -136,6 +142,7 @@ private:
     {
         std::string         filename;
         std::vector<int>    rowgroups;
+        std::vector<HivePartitionValue> partitions;  /* Hive partition values */
     };
 private:
     std::unique_ptr<ParquetReader> reader;
@@ -171,6 +178,10 @@ private:
         r->open();
         r->create_column_mapping(tuple_desc, attrs_used);
 
+        /* Set Hive partition values if present */
+        if (!files[cur_reader].partitions.empty())
+            r->set_partition_values(files[cur_reader].partitions, tuple_desc, attrs_used);
+
         cur_reader++;
 
         return r;
@@ -189,7 +200,7 @@ public:
 
     ~MultifileExecutionState() = default;
 
-    bool next(TupleTableSlot *slot, bool fake=false)
+    bool next(TupleTableSlot *slot, bool fake=false) override
     {
         ReadStatus  res;
 
@@ -228,12 +239,12 @@ public:
         return res == RS_SUCCESS;
     }
 
-    void rescan(void)
+    void rescan(void) override
     {
         reader->rescan();
     }
 
-    void add_file(const char *filename, List *rowgroups)
+    void add_file(const char *filename, List *rowgroups) override
     {
         FileRowgroups   fr;
         ListCell       *lc;
@@ -244,17 +255,24 @@ public:
         files.push_back(fr);
     }
 
-    void set_coordinator(ParallelCoordinator *coord)
+    void set_partition_values(const std::vector<HivePartitionValue> &partitions) override
+    {
+        /* Set partition values for the most recently added file */
+        if (!files.empty())
+            files.back().partitions = partitions;
+    }
+
+    void set_coordinator(ParallelCoordinator *coord) override
     {
         this->coord = coord;
     }
 
-    Size estimate_coord_size()
+    Size estimate_coord_size() override
     {
         return sizeof(ParallelCoordinator) + sizeof(int32) * files.size();
     }
 
-    void init_coord()
+    void init_coord() override
     {
         ParallelCoordinator *coord = (ParallelCoordinator *) this->coord;
         int32  *nrowgroups;
@@ -336,19 +354,19 @@ protected:
         return false;
     }
 
-    void set_coordinator(ParallelCoordinator *coord)
+    void set_coordinator(ParallelCoordinator *coord) override
     {
         this->coord = coord;
         for (auto &reader : readers)
             reader->set_coordinator(coord);
     }
 
-    Size estimate_coord_size()
+    Size estimate_coord_size() override
     {
         return sizeof(ParallelCoordinator) + readers.size() * sizeof(int32);
     }
 
-    void init_coord()
+    void init_coord() override
     {
         coord->init_multi(readers.size());
     }
@@ -418,7 +436,7 @@ public:
         /* readers cleaned up automatically by unique_ptr */
     }
 
-    bool next(TupleTableSlot *slot, bool /* fake=false */)
+    bool next(TupleTableSlot *slot, bool /* fake=false */) override
     {
         if (unlikely(!slots_initialized))
             initialize_slots();
@@ -462,7 +480,7 @@ public:
         return true;
     }
 
-    void rescan(void)
+    void rescan(void) override
     {
         for (auto &reader: readers)
             reader->rescan();
@@ -470,7 +488,7 @@ public:
         slots_initialized = false;
     }
 
-    void add_file(const char *filename, List *rowgroups)
+    void add_file(const char *filename, List *rowgroups) override
     {
         ListCell           *lc;
         std::vector<int>    rg;
@@ -487,6 +505,13 @@ public:
         r->create_column_mapping(tuple_desc, attrs_used);
         readers.push_back(std::move(r));
     }
+
+    void set_partition_values(const std::vector<HivePartitionValue> &partitions) override
+    {
+        /* Set partition values for the most recently added reader */
+        if (!readers.empty())
+            readers.back()->set_partition_values(partitions, tuple_desc, attrs_used);
+    }
 };
 
 /*
@@ -501,6 +526,9 @@ class CachingMultifileMergeExecutionState : public MultifileMergeExecutionStateB
 private:
     /* Per-reader activation timestamps */
     std::vector<uint64_t>   ts_active;
+
+    /* Per-reader partition values (for Hive partitioning) */
+    std::vector<std::vector<HivePartitionValue>> reader_partitions;
 
     int                     num_active_readers;
 
@@ -533,6 +561,11 @@ private:
 
             activate_reader(reader.get());
             reader->create_column_mapping(tuple_desc, attrs_used);
+
+            /* Set Hive partition values if present */
+            if (static_cast<size_t>(i) < reader_partitions.size() &&
+                !reader_partitions[i].empty())
+                reader->set_partition_values(reader_partitions[i], tuple_desc, attrs_used);
 
             if (reader->next(rs.slot) == RS_SUCCESS)
             {
@@ -619,7 +652,7 @@ public:
         /* readers cleaned up automatically by unique_ptr */
     }
 
-    bool next(TupleTableSlot *slot, bool /* fake=false */)
+    bool next(TupleTableSlot *slot, bool /* fake=false */) override
     {
         if (unlikely(!slots_initialized))
             initialize_slots();
@@ -673,7 +706,7 @@ public:
         }
     }
 
-    void rescan(void)
+    void rescan(void) override
     {
         for (auto &reader: readers)
             reader->rescan();
@@ -681,7 +714,7 @@ public:
         slots_initialized = false;
     }
 
-    void add_file(const char *filename, List *rowgroups)
+    void add_file(const char *filename, List *rowgroups) override
     {
         ListCell           *lc;
         std::vector<int>    rg;
@@ -695,9 +728,19 @@ public:
         r->set_rowgroups_list(rg);
         r->set_options(use_threads, use_mmap);
         readers.push_back(std::move(r));
+
+        /* Ensure partition values vector is large enough */
+        reader_partitions.resize(readers.size());
     }
 
-    void set_coordinator(ParallelCoordinator * /* coord */)
+    void set_partition_values(const std::vector<HivePartitionValue> &partitions) override
+    {
+        /* Store partition values for the most recently added reader */
+        if (!readers.empty())
+            reader_partitions.back() = partitions;
+    }
+
+    void set_coordinator(ParallelCoordinator * /* coord */) override
     {
         Assert(false);  /* not supported, should never happen */
     }

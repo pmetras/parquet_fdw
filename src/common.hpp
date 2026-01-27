@@ -3,6 +3,8 @@
 
 #include <cstdarg>
 #include <cstddef>
+#include <string>
+#include <vector>
 
 #include "arrow/api.h"
 
@@ -103,5 +105,90 @@ arrow::DataType *get_arrow_list_elem_type(arrow::DataType *type);
 void datum_to_jsonb(Datum value, Oid typoid, bool isnull, FmgrInfo *outfunc,
                     JsonbParseState *result, bool iskey);
 int32 string_to_int32(const char *s);
+
+/*
+ * Hive partition extraction function types
+ */
+enum PartitionExtractFunc
+{
+    PEF_IDENTITY = 0,   /* Use column value directly */
+    PEF_YEAR,           /* Extract year from DATE/TIMESTAMP */
+    PEF_MONTH,          /* Extract month (1-12) from DATE/TIMESTAMP */
+    PEF_DAY             /* Extract day (1-31) from DATE/TIMESTAMP */
+};
+
+/*
+ * HivePartitionValue
+ *      Represents a single partition key=value extracted from a file path.
+ *      Example: from path ".../year=2023/month=01/data.parquet"
+ *               we extract {key="year", value="2023"} and {key="month", value="01"}
+ */
+struct HivePartitionValue
+{
+    std::string key;        /* partition key name, e.g. "year" */
+    std::string value;      /* partition value as string, e.g. "2023" */
+    Oid         pg_type;    /* inferred PostgreSQL type (INT4OID, TEXTOID, etc.) */
+    int         attnum;     /* attribute number in tuple descriptor (-1 if unmapped) */
+    Datum       datum;      /* converted datum value */
+    bool        isnull;     /* true if value is NULL (__HIVE_DEFAULT_PARTITION__) */
+
+    HivePartitionValue()
+        : pg_type(InvalidOid), attnum(-1), datum(0), isnull(false)
+    {}
+
+    HivePartitionValue(const std::string &k, const std::string &v)
+        : key(k), value(v), pg_type(InvalidOid), attnum(-1), datum(0), isnull(false)
+    {}
+};
+
+/*
+ * HivePartitionMapping
+ *      Maps a table column to a partition key with an optional extraction function.
+ *      Example: partition_map 'year={YEAR(event_date)}, month={MONTH(event_date)}'
+ *               creates mappings: {partition_key="year", column_name="event_date", func=PEF_YEAR}
+ *                                {partition_key="month", column_name="event_date", func=PEF_MONTH}
+ */
+struct HivePartitionMapping
+{
+    std::string         partition_key;   /* partition key name in path, e.g. "year" */
+    std::string         column_name;     /* table column name, e.g. "event_date" */
+    PartitionExtractFunc func;           /* extraction function to apply */
+    int                 attnum;          /* attribute number of column (-1 if not resolved) */
+    Oid                 column_type;     /* PostgreSQL type of the mapped column */
+
+    HivePartitionMapping()
+        : func(PEF_IDENTITY), attnum(-1), column_type(InvalidOid)
+    {}
+
+    HivePartitionMapping(const std::string &pk, const std::string &cn, PartitionExtractFunc f)
+        : partition_key(pk), column_name(cn), func(f), attnum(-1), column_type(InvalidOid)
+    {}
+};
+
+/*
+ * Hive partition helper functions
+ */
+
+/* Extract partition key=value pairs from a file path */
+std::vector<HivePartitionValue> extract_hive_partitions(const char *path);
+
+/* Infer PostgreSQL type from a partition value string */
+Oid infer_partition_type(const char *value);
+
+/* Convert a string value to a Datum of the specified type */
+Datum string_to_datum(const char *value, Oid pg_type, bool *isnull);
+
+/* Parse partition_map option string into a list of mappings */
+std::vector<HivePartitionMapping> parse_partition_map(const char *map_str);
+
+/* Extract a partition value from a column datum using the specified function */
+Datum extract_partition_value(Datum column_value, Oid column_type,
+                              PartitionExtractFunc func, Oid *result_type);
+
+/* URL-decode a string (handles %XX encoding) */
+std::string url_decode(const std::string &encoded);
+
+/* Check if a value represents the Hive NULL partition */
+bool is_hive_null_partition(const char *value);
 
 #endif

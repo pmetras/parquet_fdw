@@ -1,0 +1,159 @@
+-- Hive partitioning tests
+SET datestyle = 'ISO';
+SET client_min_messages = WARNING;
+SET log_statement TO 'none';
+-- Clean up any leftover objects from previous test runs
+-- Note: test 003 leaves example_parent tables owned by regress_parquet_fdw
+DROP TABLE IF EXISTS example_parent1 CASCADE;
+DROP TABLE IF EXISTS example_parent2 CASCADE;
+DROP EXTENSION IF EXISTS parquet_fdw CASCADE;
+DROP ROLE IF EXISTS regress_parquet_fdw;
+-- Create fresh objects
+CREATE EXTENSION parquet_fdw;
+CREATE ROLE regress_parquet_fdw LOGIN SUPERUSER;
+CREATE SERVER parquet_srv FOREIGN DATA WRAPPER parquet_fdw;
+CREATE USER MAPPING FOR regress_parquet_fdw SERVER parquet_srv;
+SET ROLE regress_parquet_fdw;
+-- Test 1: Basic Hive partitioning with virtual columns
+-- The directory structure is: hive/basic/year=YYYY/month=M/data.parquet
+-- Parquet files contain: id, amount, name
+-- year and month are virtual columns extracted from path
+CREATE FOREIGN TABLE hive_basic (
+    id BIGINT,
+    amount FLOAT8,
+    name TEXT,
+    year INT,      -- virtual column from path
+    month INT      -- virtual column from path
+)
+SERVER parquet_srv
+OPTIONS (
+    filename '@abs_srcdir@/data/hive/basic/year=2023/month=1/data.parquet @abs_srcdir@/data/hive/basic/year=2023/month=2/data.parquet @abs_srcdir@/data/hive/basic/year=2024/month=1/data.parquet @abs_srcdir@/data/hive/basic/year=2024/month=2/data.parquet',
+    hive_partitioning 'true'
+);
+-- Verify all data is read with virtual columns
+SELECT * FROM hive_basic ORDER BY id;
+ id | amount |  name   | year | month 
+----+--------+---------+------+-------
+  1 |    100 | Alice   | 2023 |     1
+  2 |    200 | Bob     | 2023 |     1
+  3 |    150 | Charlie | 2023 |     2
+  4 |    250 | Diana   | 2023 |     2
+  5 |    175 | Eve     | 2024 |     1
+  6 |    225 | Frank   | 2024 |     1
+  7 |    125 | Grace   | 2024 |     2
+  8 |    275 | Henry   | 2024 |     2
+(8 rows)
+
+-- Test partition pruning: only scan year=2023 (4 rows from 2 files)
+SELECT * FROM hive_basic WHERE year = 2023 ORDER BY id;
+ id | amount |  name   | year | month 
+----+--------+---------+------+-------
+  1 |    100 | Alice   | 2023 |     1
+  2 |    200 | Bob     | 2023 |     1
+  3 |    150 | Charlie | 2023 |     2
+  4 |    250 | Diana   | 2023 |     2
+(4 rows)
+
+-- Test partition pruning: only scan month=1 (4 rows from 2 files)
+SELECT * FROM hive_basic WHERE month = 1 ORDER BY id;
+ id | amount | name  | year | month 
+----+--------+-------+------+-------
+  1 |    100 | Alice | 2023 |     1
+  2 |    200 | Bob   | 2023 |     1
+  5 |    175 | Eve   | 2024 |     1
+  6 |    225 | Frank | 2024 |     1
+(4 rows)
+
+-- Test partition pruning: year=2024 AND month=2 (2 rows from 1 file)
+SELECT * FROM hive_basic WHERE year = 2024 AND month = 2 ORDER BY id;
+ id | amount | name  | year | month 
+----+--------+-------+------+-------
+  7 |    125 | Grace | 2024 |     2
+  8 |    275 | Henry | 2024 |     2
+(2 rows)
+
+-- EXPLAIN should show partition info
+EXPLAIN (COSTS OFF) SELECT * FROM hive_basic WHERE year = 2023;
+         QUERY PLAN         
+----------------------------
+ Foreign Scan on hive_basic
+   Filter: (year = 2023)
+   Reader: Multifile
+   Row groups: 
+     data.parquet: 1
+     data.parquet: 1
+(6 rows)
+
+-- Test 2: Text partition values
+CREATE FOREIGN TABLE hive_region (
+    id BIGINT,
+    sales FLOAT8,
+    region TEXT    -- virtual column from path
+)
+SERVER parquet_srv
+OPTIONS (
+    filename '@abs_srcdir@/data/hive/region/region=US/data.parquet @abs_srcdir@/data/hive/region/region=EU/data.parquet',
+    hive_partitioning 'true'
+);
+-- Verify all data with region partition column
+SELECT * FROM hive_region ORDER BY id;
+ id | sales | region 
+----+-------+--------
+  1 |  1000 | US
+  2 |  1500 | US
+  3 |  2000 | EU
+  4 |  2500 | EU
+(4 rows)
+
+-- Test partition pruning with text value (2 rows from 1 file)
+SELECT * FROM hive_region WHERE region = 'US' ORDER BY id;
+ id | sales | region 
+----+-------+--------
+  1 |  1000 | US
+  2 |  1500 | US
+(2 rows)
+
+-- Test 3: Mixed queries with partition and non-partition filters
+SELECT * FROM hive_basic WHERE year = 2023 AND amount > 150 ORDER BY id;
+ id | amount | name  | year | month 
+----+--------+-------+------+-------
+  2 |    200 | Bob   | 2023 |     1
+  4 |    250 | Diana | 2023 |     2
+(2 rows)
+
+SELECT * FROM hive_basic WHERE year = 2024 AND name LIKE 'E%' ORDER BY id;
+ id | amount | name | year | month 
+----+--------+------+------+-------
+  5 |    175 | Eve  | 2024 |     1
+(1 row)
+
+-- Test 4: Aggregates with partition values
+SELECT year, month, COUNT(*), SUM(amount)
+FROM hive_basic
+GROUP BY year, month
+ORDER BY year, month;
+ year | month | count | sum 
+------+-------+-------+-----
+ 2023 |     1 |     2 | 300
+ 2023 |     2 |     2 | 400
+ 2024 |     1 |     2 | 400
+ 2024 |     2 |     2 | 400
+(4 rows)
+
+SELECT year, COUNT(*) as cnt
+FROM hive_basic
+WHERE year = 2023
+GROUP BY year;
+ year | cnt 
+------+-----
+ 2023 |   4
+(1 row)
+
+-- Clean up
+DROP FOREIGN TABLE hive_basic;
+DROP FOREIGN TABLE hive_region;
+DROP USER MAPPING FOR regress_parquet_fdw SERVER parquet_srv;
+DROP SERVER parquet_srv CASCADE;
+RESET ROLE;
+DROP ROLE regress_parquet_fdw;
+DROP EXTENSION parquet_fdw CASCADE;

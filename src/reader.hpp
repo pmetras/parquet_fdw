@@ -155,6 +155,22 @@ enum ReadStatus
 class ParquetReader
 {
 protected:
+    /*
+     * Partition column info - for virtual columns from Hive partition paths.
+     * Stores partition values that come from the file path rather than the Parquet data.
+     */
+    struct PartitionColumnInfo
+    {
+        int         attnum;         /* attribute number in tuple descriptor */
+        Oid         pg_type;        /* PostgreSQL type */
+        Datum       value;          /* cached partition value (converted to Datum) */
+        bool        isnull;         /* whether value is NULL */
+        std::string key;            /* partition key name (for error messages) */
+
+        PartitionColumnInfo()
+            : attnum(-1), pg_type(InvalidOid), value(0), isnull(true)
+        {}
+    };
 
     struct TypeInfo
     {
@@ -268,6 +284,12 @@ protected:
     /* Wether object is properly initialized */
     bool    initialized;
 
+    /*
+     * Hive partition columns - virtual columns from file path.
+     * Maps attribute index to partition column info.
+     */
+    std::vector<PartitionColumnInfo>    partition_columns;
+
 protected:
     Datum do_cast(Datum val, const TypeInfo &typinfo);
     Datum read_primitive_type(arrow::Array *array, const TypeInfo &typinfo,
@@ -305,6 +327,10 @@ public:
     void set_rowgroups_list(const std::vector<int> &rowgroups);
     void set_options(bool use_threads, bool use_mmap);
     void set_coordinator(ParallelCoordinator *coord);
+    void set_partition_values(const std::vector<HivePartitionValue> &partitions,
+                              TupleDesc tupleDesc,
+                              const std::set<int> &attrs_used);
+    const std::string& get_filename() const { return filename; }
 };
 
 ParquetReader *create_parquet_reader(const char *filename,

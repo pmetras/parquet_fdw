@@ -34,6 +34,9 @@ public:
     virtual void set_coordinator(ParallelCoordinator *coord) = 0;
     virtual Size estimate_coord_size() = 0;
     virtual void init_coord() = 0;
+
+    /* Set partition values for the most recently added file (for Hive partitioning) */
+    virtual void set_partition_values(const std::vector<HivePartitionValue> &partitions) {}
 };
 
 ParquetFdwExecutionState *create_parquet_execution_state(ReaderType reader_type,
