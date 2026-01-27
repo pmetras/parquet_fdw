@@ -273,21 +273,41 @@ select import_parquet_explicit(
 
 ### Debian / Ubuntu
 
-After `sudo make install PG_CONFIG=/usr/lib/postgresql/17/bin/pg_config`
+The Makefile includes a target to create Debian packages automatically:
 
 ```sh
-cd Debian
-# Copy the new extension binary
-sudo cp ../parquet_fdw.so postgresql-17-parquet-fdw/usr/lib/postgresql/17/lib/
-# Copy LLVM bytecode
-sudo cp ../src/*.bc postgresql-17-parquet-fdw/usr/lib/postgresql/17/lib/bitcode/parquet_fdw/src/
-# Copy extension bytecode index from installation
-sudo cp /usr/lib/postgresql/17/lib/bitcode/parquet_fdw.index.bc postgresql-17-parquet-fdw/usr/lib/postgresql/17/lib/bitcode/parquet_fdw.index.bc
-# Create package
-dpkg-deb --build --root-owner-group postgresql-17-parquet-fdw
+# Build and install the extension first
+sudo make install PG_CONFIG=/usr/lib/postgresql/17/bin/pg_config
+
+# Create the Debian package for the same PostgreSQL version
+make debian PG_CONFIG=/usr/lib/postgresql/17/bin/pg_config
 ```
 
-After installation, dont't forget to restart the PostgreSQL server.
+This creates a package named `postgresql-17-parquet-fdw.deb` in the `Debian/` directory.
+
+To build for a different PostgreSQL version, specify the appropriate `pg_config`:
+
+```sh
+# For PostgreSQL 16
+make debian PG_CONFIG=/usr/lib/postgresql/16/bin/pg_config
+
+# For PostgreSQL 18
+make debian PG_CONFIG=/usr/lib/postgresql/18/bin/pg_config
+```
+
+Install the package with:
+
+```sh
+sudo dpkg -i Debian/postgresql-17-parquet-fdw.deb
+```
+
+To clean up build artifacts:
+
+```sh
+make debian-clean
+```
+
+After installation, don't forget to restart the PostgreSQL server.
 
 ## Miscelaneous
 
