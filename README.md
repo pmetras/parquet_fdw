@@ -93,7 +93,8 @@ Following table options are supported:
 * **use_threads** - enables Apache Arrow's parallel columns decoding/decompression (default `false`);
 * **files_func** - user defined function that is used by parquet_fdw to retrieve the list of parquet files on each query; function must take one `JSONB` argument and return text array of full paths to parquet files;
 * **files_func_arg** - argument for the function, specified by **files_func**;
-* **max_open_files** - the limit for the number of Parquet files open simultaneously.
+* **max_open_files** - the limit for the number of Parquet files open simultaneously;
+* **hive_partitioning** - enable Hive-style partition extraction from directory paths (default `false`). See [Hive Partitioning](#hive-partitioning) section below.
 
 GUC variables:
 * **parquet_fdw.use_threads** - global switch that allow user to enable or disable threads (default `true`);
@@ -138,6 +139,49 @@ ALTER SYSTEM SET parquet_fdw.allowed_directories = '/data/sales, /data/marketing
 SELECT pg_reload_conf();
 
 -- Now non-superuser roles can create foreign tables pointing to these directories
+```
+
+### Hive Partitioning
+
+`parquet_fdw` supports Hive-style partitioned directories where partition values are encoded in the directory path as `key=value` segments. When enabled, these partition values are automatically extracted and exposed as virtual columns in the table.
+
+**Example directory structure:**
+```
+/data/sales/year=2023/month=1/data.parquet
+/data/sales/year=2023/month=2/data.parquet
+/data/sales/year=2024/month=1/data.parquet
+```
+
+**Creating a table with Hive partitioning:**
+```sql
+create foreign table sales (
+    id           int,
+    amount       float8,
+    name         text,
+    year         int,      -- virtual column from path
+    month        int       -- virtual column from path
+)
+server parquet_srv
+options (
+    filename '/data/sales/year=2023/month=1/data.parquet /data/sales/year=2023/month=2/data.parquet /data/sales/year=2024/month=1/data.parquet',
+    hive_partitioning 'true'
+);
+```
+
+**Features:**
+- Partition values are automatically extracted from directory names matching `key=value` pattern
+- Virtual columns (year, month in the example) are populated from path values, not from Parquet file data
+- **Partition pruning**: Files are skipped at planning time if their partition values don't match WHERE clause filters
+- Both integer and text partition values are supported
+- Type inference: numeric-looking values become integers, others become text
+
+**Partition pruning example:**
+```sql
+-- Only scans files in year=2023 directories (year=2024 files are pruned)
+select * from sales where year = 2023;
+
+-- Only scans year=2024/month=1 (other partitions are pruned)
+select * from sales where year = 2024 and month = 1;
 ```
 
 ### Parallel queries
