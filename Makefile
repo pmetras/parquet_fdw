@@ -75,3 +75,63 @@ $(TEST_SQL): test/sql/%.sql: test/sql/%.sql.in
 
 $(TEST_EXPECTED): test/expected/%.out: test/expected/%.out.in
 	sed 's,@abs_srcdir@,$(ROOT_DIR)/test,g' $< > $@
+
+# Debian package creation
+# Usage: make debian [PG_CONFIG=/path/to/pg_config]
+
+PG_VERSION := $(shell $(PG_CONFIG) --version | sed 's/PostgreSQL \([0-9]*\).*/\1/')
+PG_PKGLIBDIR := $(shell $(PG_CONFIG) --pkglibdir)
+PG_SHAREDIR := $(shell $(PG_CONFIG) --sharedir)
+PKG_NAME := postgresql-$(PG_VERSION)-parquet-fdw
+PKG_VERSION := 0.2
+PKG_DIR := Debian/$(PKG_NAME)
+PKG_LIBDIR := $(PKG_DIR)/usr/lib/postgresql/$(PG_VERSION)/lib
+PKG_EXTDIR := $(PKG_DIR)/usr/share/postgresql/$(PG_VERSION)/extension
+
+.PHONY: debian debian-clean
+
+debian: all
+	@echo "Building Debian package for PostgreSQL $(PG_VERSION)..."
+	# Clean and create directory structure
+	rm -rf $(PKG_DIR)
+	mkdir -p $(PKG_DIR)/DEBIAN
+	mkdir -p $(PKG_LIBDIR)/bitcode/parquet_fdw/src
+	mkdir -p $(PKG_EXTDIR)
+	# Copy shared library
+	cp parquet_fdw.so $(PKG_LIBDIR)/
+	# Copy LLVM bitcode files
+	cp src/*.bc $(PKG_LIBDIR)/bitcode/parquet_fdw/src/
+	# Create bitcode index (copy from installed location or generate)
+	@if [ -f "$(PG_PKGLIBDIR)/bitcode/parquet_fdw.index.bc" ]; then \
+		cp $(PG_PKGLIBDIR)/bitcode/parquet_fdw.index.bc $(PKG_LIBDIR)/bitcode/; \
+	else \
+		echo "Warning: bitcode index not found, run 'make install' first"; \
+	fi
+	# Copy extension files
+	cp parquet_fdw.control $(PKG_EXTDIR)/
+	cp parquet_fdw--*.sql $(PKG_EXTDIR)/
+	# Generate control file
+	@echo "Package: $(PKG_NAME)" > $(PKG_DIR)/DEBIAN/control
+	@echo "Version: $(PKG_VERSION)" >> $(PKG_DIR)/DEBIAN/control
+	@echo "Section: database" >> $(PKG_DIR)/DEBIAN/control
+	@echo "Priority: optional" >> $(PKG_DIR)/DEBIAN/control
+	@echo "Architecture: $$(dpkg --print-architecture)" >> $(PKG_DIR)/DEBIAN/control
+	@echo "Maintainer: Pierre Métras <p.metras@nfb.ca>" >> $(PKG_DIR)/DEBIAN/control
+	@echo "Depends: postgresql-$(PG_VERSION)" >> $(PKG_DIR)/DEBIAN/control
+	@echo "Description: Apache Parquet foreign data wrapper for PostgreSQL $(PG_VERSION)" >> $(PKG_DIR)/DEBIAN/control
+	@echo " Read-only foreign data wrapper for Apache Parquet files." >> $(PKG_DIR)/DEBIAN/control
+	@echo " ." >> $(PKG_DIR)/DEBIAN/control
+	@echo " Features:" >> $(PKG_DIR)/DEBIAN/control
+	@echo "  - Query Parquet files as PostgreSQL foreign tables" >> $(PKG_DIR)/DEBIAN/control
+	@echo "  - Support for file globbing and multiple files" >> $(PKG_DIR)/DEBIAN/control
+	@echo "  - Hive-style partitioning with partition pruning" >> $(PKG_DIR)/DEBIAN/control
+	@echo "  - Parallel query execution" >> $(PKG_DIR)/DEBIAN/control
+	@echo " ." >> $(PKG_DIR)/DEBIAN/control
+	@echo " See https://github.com/pmetras/parquet_fdw" >> $(PKG_DIR)/DEBIAN/control
+	# Build the package
+	dpkg-deb --build --root-owner-group $(PKG_DIR)
+	@echo "Package created: Debian/$(PKG_NAME).deb"
+
+debian-clean:
+	rm -rf Debian/postgresql-*-parquet-fdw
+	rm -f Debian/postgresql-*-parquet-fdw.deb
