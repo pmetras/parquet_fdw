@@ -1,15 +1,17 @@
 Package: postgresql-17-parquet-fdw
 Version: 0.2
-Section: base
+Section: database
 Priority: optional
 Architecture: amd64
 Maintainer: Pierre Métras <p.metras@nfb.ca>
 Depends: postgresql-17
-Description: Access and query Apache Parquet files from PostgreSQL v17
- This foreign data extension allows to:
- - Create foreign tables that are mapped to Parquet files.
- - Import all Parquet files in a schema and define the mapping to SQL
-   tables.
- - Write SELECT queries on these tables as if they were native SQL tables.
+Description: Apache Parquet foreign data wrapper for PostgreSQL 17
+ Read-only foreign data wrapper for Apache Parquet files.
+ .
+ Features:
+  - Query Parquet files as PostgreSQL foreign tables
+  - Support for file globbing and multiple files
+  - Hive-style partitioning with partition pruning
+  - Parallel query execution
  .
  See https://github.com/pmetras/parquet_fdw

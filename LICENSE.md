@@ -1,4 +1,5 @@
 Copyright (c) 2018-2019, adjust GmbH
+Copyright (c) 2025-2026, Pierre Métras <pierre@alterna.tv>
 
 Permission to use, copy, modify, and distribute this software and its documentation for any purpose, without fee, and without a written agreement is hereby granted, provided that the above copyright notice and this paragraph and the following two paragraphs appear in all copies.
 

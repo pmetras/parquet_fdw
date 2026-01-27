@@ -4,6 +4,8 @@
 #include <cstring>
 #include <regex>
 
+#include "arrow/util/decimal.h"
+
 extern "C"
 {
 #include "postgres.h"
@@ -17,6 +19,7 @@ extern "C"
 #include "utils/memdebug.h"
 #include "utils/timestamp.h"
 #include "utils/palloc.h"
+#include "utils/numeric.h"
 }
 
 #ifndef PG_VERSION_NUM
@@ -136,8 +139,13 @@ to_postgres_type(const arrow::DataType *arrow_type)
             return BYTEAOID;
         case arrow::Type::TIMESTAMP:
             return TIMESTAMPOID;
+        case arrow::Type::TIME64:
+            return TIMEOID;
         case arrow::Type::DATE32:
             return DATEOID;
+        case arrow::Type::DECIMAL128:
+        case arrow::Type::DECIMAL256:
+            return NUMERICOID;
         // UUID should be user-extension types, but that's not the case presently...
         // If the size is 16 bytes, we consider it is a UUID.
         case arrow::Type::FIXED_SIZE_BINARY:
@@ -193,6 +201,18 @@ bytes_to_postgres_type(const char *bytes, Size len, const arrow::DataType *arrow
         case arrow::Type::DATE32:
             return DateADTGetDatum(*(int32 *) bytes +
                                    (UNIX_EPOCH_JDATE - POSTGRES_EPOCH_JDATE));
+        case arrow::Type::TIME64:
+            {
+                int64 time_val = *(int64 *) bytes;
+                auto t64type = static_cast<const arrow::Time64Type *>(arrow_type);
+
+                /* PostgreSQL TIME is stored in microseconds */
+                if (t64type->unit() == arrow::TimeUnit::NANO)
+                    time_val = time_val / 1000;  /* Convert nanoseconds to microseconds */
+                /* If MICRO, use value as-is */
+
+                return TimeADTGetDatum(time_val);
+            }
         case arrow::Type::FIXED_SIZE_BINARY:
             if (is_fixed_size_uuid(arrow_type))
             {

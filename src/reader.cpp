@@ -20,6 +20,7 @@ extern "C"
 #include "utils/lsyscache.h"
 #include "utils/memutils.h"
 #include "utils/timestamp.h"
+#include "utils/numeric.h"
 
 #if PG_VERSION_NUM < 110000
 #include "catalog/pg_type.h"
@@ -205,6 +206,7 @@ void ParquetReader::create_column_mapping(TupleDesc tupleDesc, const std::set<in
                 this->map[i] = this->column_names.size() - 1;
 
                 typinfo.pg.oid = TupleDescAttr(tupleDesc, i)->atttypid;
+                typinfo.pg.typmod = TupleDescAttr(tupleDesc, i)->atttypmod;
                 switch (arrow_type->id())
                 {
                     case arrow::Type::LIST:
@@ -459,6 +461,111 @@ Datum ParquetReader::read_primitive_type(arrow::Array *array,
             * simple calculations here.
             */
             res = DateADTGetDatum(d + (UNIX_EPOCH_JDATE - POSTGRES_EPOCH_JDATE));
+            break;
+        }
+        case arrow::Type::TIME64:
+        {
+            auto *tarray = static_cast<arrow::Time64Array *>(array);
+            auto *ttype = static_cast<arrow::Time64Type *>(array->type().get());
+            int64 value = tarray->Value(i);
+
+            /* PostgreSQL TIME is stored in microseconds */
+            if (ttype->unit() == arrow::TimeUnit::NANO)
+            {
+                /* Round to nearest microsecond instead of truncating */
+                value = (value + 500) / 1000;
+            }
+            /* If MICRO, use value as-is */
+
+            /*
+             * Validate TIME range: PostgreSQL TIME is 00:00:00 to 24:00:00
+             * which is 0 to 24*60*60*1000000 = 86400000000 microseconds
+             */
+            const int64 MAX_TIME_USEC = INT64CONST(86400000000);
+            if (value < 0 || value > MAX_TIME_USEC)
+            {
+                ereport(WARNING,
+                        (errcode(ERRCODE_DATETIME_VALUE_OUT_OF_RANGE),
+                         errmsg("parquet_fdw: TIME value out of range, clamping"),
+                         errdetail("Value %lld microseconds is outside 00:00:00-24:00:00 range.", (long long) value)));
+                if (value < 0)
+                    value = 0;
+                else
+                    value = MAX_TIME_USEC;
+            }
+
+            res = TimeADTGetDatum(value);
+            break;
+        }
+        case arrow::Type::DECIMAL128:
+        {
+            auto *decarray = static_cast<arrow::Decimal128Array *>(array);
+            auto *dectype = static_cast<arrow::Decimal128Type *>(array->type().get());
+            std::string val = decarray->FormatValue(i);
+
+            /*
+             * Check if Parquet precision exceeds PostgreSQL column precision.
+             * Only warn once per column to avoid log flooding.
+             *
+             * NUMERIC typmod encodes precision as: ((typmod - VARHDRSZ) >> 16) & 0xFFFF
+             * If typmod == -1, no precision was specified (variable precision).
+             */
+            if (!typinfo.decimal_precision_warned && typinfo.pg.typmod != -1)
+            {
+                int32 parquet_precision = dectype->precision();
+                int32 pg_precision = ((typinfo.pg.typmod - VARHDRSZ) >> 16) & 0xFFFF;
+
+                if (parquet_precision > pg_precision)
+                {
+                    ereport(WARNING,
+                            (errcode(ERRCODE_NUMERIC_VALUE_OUT_OF_RANGE),
+                             errmsg("parquet_fdw: DECIMAL precision loss possible"),
+                             errdetail("Parquet column has precision %d but PostgreSQL column has precision %d.",
+                                       parquet_precision, pg_precision)));
+                    typinfo.decimal_precision_warned = true;
+                }
+            }
+
+            /* Copy to palloc'd memory to ensure it survives */
+            char *cval = pstrdup(val.c_str());
+            res = DirectFunctionCall3(numeric_in,
+                                      CStringGetDatum(cval),
+                                      ObjectIdGetDatum(InvalidOid),
+                                      Int32GetDatum(-1));
+            break;
+        }
+        case arrow::Type::DECIMAL256:
+        {
+            auto *decarray = static_cast<arrow::Decimal256Array *>(array);
+            auto *dectype = static_cast<arrow::Decimal256Type *>(array->type().get());
+            std::string val = decarray->FormatValue(i);
+
+            /*
+             * Check if Parquet precision exceeds PostgreSQL column precision.
+             * Only warn once per column to avoid log flooding.
+             */
+            if (!typinfo.decimal_precision_warned && typinfo.pg.typmod != -1)
+            {
+                int32 parquet_precision = dectype->precision();
+                int32 pg_precision = ((typinfo.pg.typmod - VARHDRSZ) >> 16) & 0xFFFF;
+
+                if (parquet_precision > pg_precision)
+                {
+                    ereport(WARNING,
+                            (errcode(ERRCODE_NUMERIC_VALUE_OUT_OF_RANGE),
+                             errmsg("parquet_fdw: DECIMAL precision loss possible"),
+                             errdetail("Parquet column has precision %d but PostgreSQL column has precision %d.",
+                                       parquet_precision, pg_precision)));
+                    typinfo.decimal_precision_warned = true;
+                }
+            }
+
+            /* Copy to palloc'd memory to ensure it survives */
+            char *cval = pstrdup(val.c_str());
+            res = DirectFunctionCall3(numeric_in,
+                                      CStringGetDatum(cval),
+                                      ObjectIdGetDatum(InvalidOid),
+                                      Int32GetDatum(-1));
             break;
         }
         case arrow::Type::FIXED_SIZE_BINARY:

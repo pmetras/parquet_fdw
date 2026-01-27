@@ -2,314 +2,511 @@
 
 # parquet_fdw
 
-Read-only Apache Parquet foreign data wrapper for PostgreSQL.
+A read-only PostgreSQL Foreign Data Wrapper (FDW) for Apache Parquet files.
+
+## Table of Contents
+
+- [Requirements](#requirements)
+- [Installation](#installation)
+- [Quick Start](#quick-start)
+- [Supported Data Types](#supported-data-types)
+- [Table Options](#table-options)
+- [File Patterns and Globbing](#file-patterns-and-globbing)
+- [Hive Partitioning](#hive-partitioning)
+- [Execution Strategies](#execution-strategies)
+- [Parallel Query Execution](#parallel-query-execution)
+- [Schema Import](#schema-import)
+- [Security](#security)
+- [Configuration](#configuration)
+- [Packaging](#packaging)
 
 ## Requirements
 
 - PostgreSQL 12-18 (versions 10-11 are end-of-life and no longer tested)
-- C++17 compiler
-- Apache Arrow 0.15+ (`libarrow` and `libparquet`)
+- C++17 compatible compiler
+- Apache Arrow 0.15+ (`libarrow` and `libparquet` libraries)
 
 ## Installation
 
-`parquet_fdw` requires `libarrow` and `libparquet` installed in your system (requires version 0.15+, for previous versions use branch [arrow-0.14](https://github.com/adjust/parquet_fdw/tree/arrow-0.14)). Please refer to [libarrow installation page](https://arrow.apache.org/install/) or [building guide](https://github.com/apache/arrow/blob/master/docs/source/developers/cpp/building.rst).
-To build `parquet_fdw` run:
+The extension requires `libarrow` and `libparquet` installed on your system. For Arrow versions prior to 0.15, use the [arrow-0.14](https://github.com/adjust/parquet_fdw/tree/arrow-0.14) branch.
+
+Refer to the [Apache Arrow installation page](https://arrow.apache.org/install/) or the [building guide](https://github.com/apache/arrow/blob/master/docs/source/developers/cpp/building.rst) for installation instructions.
+
+To build and install `parquet_fdw`:
+
 ```sh
 make install
 ```
-or in case when PostgreSQL is installed in a custom location:
+
+If PostgreSQL is installed in a custom location:
+
 ```sh
 make install PG_CONFIG=/path/to/pg_config
 ```
-It is possible to pass additional compilation flags through either custom
-`CCFLAGS` or standard `PG_CFLAGS`, `PG_CXXFLAGS`, `PG_CPPFLAGS` variables.
 
-After extension was successfully installed run in `psql`:
+You can pass additional compilation flags through the `CCFLAGS`, `PG_CFLAGS`, `PG_CXXFLAGS`, or `PG_CPPFLAGS` variables.
+
+After successful installation, enable the extension in PostgreSQL:
+
 ```sql
-create extension parquet_fdw;
+CREATE EXTENSION parquet_fdw;
 ```
 
-## Basic usage
+## Quick Start
 
-To start using `parquet_fdw` one should first create a server and user mapping. For example:
+First, create a foreign server and user mapping:
+
 ```sql
-create server parquet_srv foreign data wrapper parquet_fdw;
-create user mapping for postgres server parquet_srv options (user 'postgres');
+CREATE SERVER parquet_srv FOREIGN DATA WRAPPER parquet_fdw;
+CREATE USER MAPPING FOR CURRENT_USER SERVER parquet_srv OPTIONS (user 'postgres');
 ```
 
-Now you should be able to create foreign table for Parquet files.
+Then create a foreign table pointing to your Parquet file:
+
 ```sql
-create foreign table userdata (
-    id           int,
-    first_name   text,
-    last_name    text
+CREATE FOREIGN TABLE users (
+    id           INT,
+    first_name   TEXT,
+    last_name    TEXT
 )
-server parquet_srv
-options (
-    filename '/mnt/userdata1.parquet'
+SERVER parquet_srv
+OPTIONS (
+    filename '/data/users.parquet'
+);
+
+-- Query the data
+SELECT * FROM users WHERE id < 100;
+```
+
+## Supported Data Types
+
+The following Arrow/Parquet types are mapped to PostgreSQL types:
+
+| Arrow Type         | PostgreSQL Type                  |
+|-------------------:|---------------------------------:|
+| INT8               | INT2                             |
+| INT16              | INT2                             |
+| INT32              | INT4                             |
+| INT64              | INT8                             |
+| FLOAT              | FLOAT4                           |
+| DOUBLE             | FLOAT8                           |
+| TIMESTAMP          | TIMESTAMP                        |
+| TIME64             | TIME                             |
+| DATE32             | DATE                             |
+| DECIMAL128         | NUMERIC                          |
+| DECIMAL256         | NUMERIC                          |
+| STRING             | TEXT                             |
+| BINARY             | BYTEA                            |
+| LIST               | ARRAY                            |
+| MAP                | JSONB                            |
+| UUID               | UUID                             |
+| FIXED_SIZE_BINARY  | UUID (if 16 bytes) or BYTEA      |
+
+**Note:** Structs and nested lists are not currently supported.
+
+### Type Conversion Details
+
+**TIME64:**
+- Parquet TIME64 can store values in microsecond or nanosecond resolution.
+- PostgreSQL TIME has microsecond resolution.
+- Nanosecond values are **rounded to the nearest microsecond** (not truncated).
+- Values outside the valid range (00:00:00 to 24:00:00) emit a WARNING and are clamped.
+
+**DECIMAL128/DECIMAL256:**
+- Parquet DECIMAL128 supports up to 38 digits of precision; DECIMAL256 supports up to 76 digits.
+- PostgreSQL NUMERIC supports up to 1000 digits.
+- If the Parquet column has higher precision than the PostgreSQL column definition, a WARNING is emitted once per column to alert about potential precision loss.
+- Row group statistics filtering is not currently supported for DECIMAL types.
+
+## Table Options
+
+The following options can be specified when creating a foreign table:
+
+| Option | Type | Default | Description |
+|--------|------|---------|-------------|
+| `filename` | string | (required) | Space-separated list of paths to Parquet files. Supports [glob patterns](#file-patterns-and-globbing). |
+| `sorted` | string | (none) | Space-separated list of columns the files are pre-sorted by. Enables optimizations for `ORDER BY`, `GROUP BY`, and merge joins. |
+| `files_in_order` | boolean | false | When true, indicates files are ordered according to `sorted` with no overlapping ranges. Enables `Gather Merge` for parallel scans. |
+| `use_mmap` | boolean | false | Use memory-mapped I/O instead of standard file reads. |
+| `use_threads` | boolean | false | Enable Apache Arrow's parallel column decoding and decompression. |
+| `max_open_files` | integer | (none) | Maximum number of Parquet files to keep open simultaneously. |
+| `files_func` | regproc | (none) | User-defined function returning file paths. Must accept `JSONB` and return `TEXT[]`. |
+| `files_func_arg` | string | (none) | JSONB argument passed to `files_func`. |
+| `hive_partitioning` | boolean | false | Enable [Hive-style partitioning](#hive-partitioning). |
+| `partition_columns` | string | (auto) | Space-separated list of partition column names. Overrides auto-discovery. |
+| `partition_map` | string | (none) | Map table columns to partition keys. See [Column-to-Partition Mapping](#column-to-partition-mapping). |
+
+### Example with Multiple Options
+
+```sql
+CREATE FOREIGN TABLE sales (
+    id        INT,
+    amount    NUMERIC(10,2),
+    date      DATE,
+    region    TEXT
+)
+SERVER parquet_srv
+OPTIONS (
+    filename '/data/sales/*.parquet',
+    sorted 'date region',
+    use_threads 'true',
+    max_open_files '10'
 );
 ```
 
-You can use [globbing](https://en.wikipedia.org/wiki/Glob_(programming)) to list all the Parquet files, like `options (filename '/mnt/userdata*.parquet')` and it will import all matching files. This can be usefull when you have a Hive directory structure, for instance organized by `year/month/day` and you can consider all Parquet files with `/mnt/userdata/*/*/*.parquet`. You can also use named enumerations using braces like `/mnt/userdata/data_{1,3}.parquet` that will consider only files `data_1.parquet` and `data_3.parquet`.
+## File Patterns and Globbing
 
-## Advanced
+The `filename` option supports glob patterns for matching multiple files:
 
-Currently `parquet_fdw` supports the following column [types](https://github.com/apache/arrow/blob/master/cpp/src/arrow/type.h):
+| Pattern | Description | Example |
+|---------|-------------|---------|
+| `*` | Match any characters | `/data/*.parquet` |
+| `**` | Match directories recursively | `/data/**/*.parquet` |
+| `?` | Match single character | `/data/file?.parquet` |
+| `{a,b}` | Match alternatives | `/data/{2023,2024}/*.parquet` |
 
-|         Arrow type |                         SQL type |
-|-------------------:|---------------------------------:|
-|               INT8 |                             INT2 |
-|              INT16 |                             INT2 |
-|              INT32 |                             INT4 |
-|              INT64 |                             INT8 |
-|              FLOAT |                           FLOAT4 |
-|             DOUBLE |                           FLOAT8 |
-|          TIMESTAMP |                        TIMESTAMP |
-|             DATE32 |                             DATE |
-|             STRING |                             TEXT |
-|             BINARY |                            BYTEA |
-|               LIST |                            ARRAY |
-|                MAP |                            JSONB |
-|               UUID |                             UUID |
-| FIXED_SIZED_BINARY | UUID when length 16, else BINARY |
-|             BINARY |                           BINARY |
-
-Currently `parquet_fdw` doesn't support structs and nested lists.
-
-Foreign table may be created for a single Parquet file and for a set of files. It is also possible to specify a user defined function, which would return a list of file paths. Depending on the number of files and table options `parquet_fdw` may use one of the following execution strategies:
-
-| Strategy                | Description              |
-|-------------------------|--------------------------|
-| **Single File**         | Basic single file reader
-| **Multifile**           | Reader which process Parquet files one by one in sequential manner |
-| **Multifile Merge**     | Reader which merges presorted Parquet files so that the produced result is also ordered; used when `sorted` option is specified and the query plan implies ordering (e.g. contains `ORDER BY` clause) |
-| **Caching Multifile Merge** | Same as `Multifile Merge`, but keeps the number of simultaneously open files limited; used when the number of specified Parquet files exceeds `max_open_files` |
-
-Following table options are supported:
-* **filename** - space separated list of paths to Parquet files to read;
-* **sorted** - space separated list of columns that Parquet files are presorted by; that would help postgres to avoid redundant sorting when running query with `ORDER BY` clause or in other cases when having a presorted set is beneficial (Group Aggregate, Merge Join);
-* **files_in_order** - specifies that files specified by `filename` or returned by `files_func` are ordered according to `sorted` option and have no intersection rangewise; this allows to use `Gather Merge` node on top of parallel Multifile scan (default `false`);
-* **use_mmap** - whether memory map operations will be used instead of file read operations (default `false`);
-* **use_threads** - enables Apache Arrow's parallel columns decoding/decompression (default `false`);
-* **files_func** - user defined function that is used by parquet_fdw to retrieve the list of parquet files on each query; function must take one `JSONB` argument and return text array of full paths to parquet files;
-* **files_func_arg** - argument for the function, specified by **files_func**;
-* **max_open_files** - the limit for the number of Parquet files open simultaneously;
-* **hive_partitioning** - enable Hive-style partition extraction from directory paths (default `false`). See [Hive Partitioning](#hive-partitioning) section below.
-
-GUC variables:
-* **parquet_fdw.use_threads** - global switch that allow user to enable or disable threads (default `true`);
-* **parquet_fdw.enable_multifile** - enable Multifile reader (default `true`).
-* **parquet_fdw.enable_multifile_merge** - enable Multifile Merge reader (default `true`).
-* **parquet_fdw.allowed_directories** - comma-separated list of directories from which Parquet files can be read. See [Security](#security) section below.
-
-### Security
-
-By default, `parquet_fdw` allows **only superusers** to create foreign tables that read Parquet files. This is because the extension can read any file accessible to the PostgreSQL server process.
-
-To allow non-superuser access, a superuser must configure the `parquet_fdw.allowed_directories` GUC variable with a comma-separated list of directories:
+**Examples:**
 
 ```sql
--- Allow reading from specific directories (superuser only)
-ALTER SYSTEM SET parquet_fdw.allowed_directories = '/data/parquet, /home/analytics/data';
-SELECT pg_reload_conf();
+-- All Parquet files in a directory
+OPTIONS (filename '/data/sales/*.parquet')
+
+-- Recursive search
+OPTIONS (filename '/data/**/*.parquet')
+
+-- Specific years using brace expansion
+OPTIONS (filename '/data/year={2023,2024}/**/*.parquet')
+
+-- Multiple directories (space-separated)
+OPTIONS (filename '/data/2023/*.parquet /data/2024/*.parquet')
 ```
 
-**Security model:**
+## Hive Partitioning
 
-| User Type | `allowed_directories` | Access |
-|-----------|----------------------|--------|
-| Superuser | Empty (default) | All files accessible to PostgreSQL |
-| Superuser | Set | All files accessible to PostgreSQL |
-| Non-superuser | Empty (default) | **Denied** |
-| Non-superuser | Set | Only files within listed directories |
+Hive-style partitioning encodes partition values in directory paths using `key=value` segments. When enabled, these values are automatically extracted and exposed as virtual columns.
 
-**Important notes:**
+### Directory Structure Example
 
-1. Paths are validated using `realpath()` to prevent symlink-based bypasses
-2. The `allowed_directories` setting uses `PGC_SUSET` context, meaning only superusers can modify it
-3. Path traversal attempts (e.g., `../`) are blocked by canonicalizing paths before validation
-4. The `files_func` option is also subject to these restrictions - paths returned by user-defined functions are validated
-
-**Example setup for multi-tenant environments:**
-
-```sql
--- Create a dedicated directory for each department
--- (run as superuser)
-ALTER SYSTEM SET parquet_fdw.allowed_directories = '/data/sales, /data/marketing';
-SELECT pg_reload_conf();
-
--- Now non-superuser roles can create foreign tables pointing to these directories
-```
-
-### Hive Partitioning
-
-`parquet_fdw` supports Hive-style partitioned directories where partition values are encoded in the directory path as `key=value` segments. When enabled, these partition values are automatically extracted and exposed as virtual columns in the table.
-
-**Example directory structure:**
 ```
 /data/sales/year=2023/month=1/data.parquet
 /data/sales/year=2023/month=2/data.parquet
 /data/sales/year=2024/month=1/data.parquet
 ```
 
-**Creating a table with Hive partitioning:**
+### Basic Usage (Virtual Columns)
+
+When partition columns don't exist in the Parquet file, they become virtual columns populated from the directory path:
+
 ```sql
-create foreign table sales (
-    id           int,
-    amount       float8,
-    name         text,
-    year         int,      -- virtual column from path
-    month        int       -- virtual column from path
+CREATE FOREIGN TABLE sales (
+    id      INT,
+    amount  NUMERIC(10,2),
+    name    TEXT,
+    year    INT,    -- Virtual column from path
+    month   INT     -- Virtual column from path
 )
-server parquet_srv
-options (
-    filename '/data/sales/year=2023/month=1/data.parquet /data/sales/year=2023/month=2/data.parquet /data/sales/year=2024/month=1/data.parquet',
+SERVER parquet_srv
+OPTIONS (
+    filename '/data/sales/**/*.parquet',
     hive_partitioning 'true'
 );
 ```
 
-**Features:**
-- Partition values are automatically extracted from directory names matching `key=value` pattern
-- Virtual columns (year, month in the example) are populated from path values, not from Parquet file data
-- **Partition pruning**: Files are skipped at planning time if their partition values don't match WHERE clause filters
-- Both integer and text partition values are supported
-- Type inference: numeric-looking values become integers, others become text
+### Partition Pruning
 
-**Partition pruning example:**
+Filters on partition columns skip files that don't match, improving query performance:
+
 ```sql
--- Only scans files in year=2023 directories (year=2024 files are pruned)
-select * from sales where year = 2023;
+-- Only scans year=2023 directories
+SELECT * FROM sales WHERE year = 2023;
 
--- Only scans year=2024/month=1 (other partitions are pruned)
-select * from sales where year = 2024 and month = 1;
+-- Only scans year=2024/month=1 directory
+SELECT * FROM sales WHERE year = 2024 AND month = 1;
 ```
 
-### Parallel queries
+### Explicit Partition Columns
 
-`parquet_fdw` also supports [parallel query execution](https://www.postgresql.org/docs/current/parallel-query.html) (not to confuse with multi-threaded decoding feature of Apache Arrow).
-
-### Import
-
-`parquet_fdw` also supports [`IMPORT FOREIGN SCHEMA`](https://www.postgresql.org/docs/current/sql-importforeignschema.html) command to discover parquet files in the specified directory on filesystem and create foreign tables according to those files. It can be used as follows:
+Override automatic partition column detection:
 
 ```sql
-import foreign schema "/path/to/directory"
-from server parquet_srv
-into public;
+OPTIONS (
+    filename '/data/sales/**/*.parquet',
+    hive_partitioning 'true',
+    partition_columns 'year month'
+)
 ```
 
-It is important that `remote_schema` here is a path to a local filesystem directory and is double quoted.
+### Column-to-Partition Mapping
 
-#### Finding Parquet files from `tables_map` option
-
-Foreign schema import also support specifying a mapping between tables and filenames with the `tables_map` option. Its value is a space-separated list of `key=value` values with table names as keys and Parquet files paths as values. Like for `filename`, file globbing can be used, and like with Linux PATH variable, the colon `:` is used to separate multiple paths within a value.
+When Parquet files contain date columns but directories are partitioned by date components (year, month, day), use `partition_map` to enable pruning based on the date column:
 
 ```sql
-import foreign schema "/path/to/directory"
-from server parquet_srv
-into public options (tables_map 'table1=/path/to/directory/2022/*/*.parquet:/path/to/directory/2023/*/*.parquet table2=/path/to/directory{2024,2025}/*/*.parquet')
-;
+-- Directory: /data/events/year=2024/month=10/data.parquet
+-- Parquet file contains: event_date column with full dates
+
+CREATE FOREIGN TABLE events (
+    id          INT,
+    event_date  DATE,    -- Exists in Parquet file
+    payload     TEXT
+)
+SERVER parquet_srv
+OPTIONS (
+    filename '/data/events/**/*.parquet',
+    hive_partitioning 'true',
+    partition_map 'year={YEAR(event_date)}, month={MONTH(event_date)}'
+);
+
+-- Prunes to year=2024/month=10 based on the date filter
+SELECT * FROM events WHERE event_date = '2024-10-15';
+
+-- Scans year=2024/month=10 and month=11
+SELECT * FROM events WHERE event_date BETWEEN '2024-10-01' AND '2024-11-30';
 ```
 
-As a security, the extension checks that the paths in the `tables_map` are within the external schema path, preventing accessing files elsewhere on the server. Also, if foreign schema `limit to` or `except` clauses are used specifiying table names, only these names will be considered in the `tables_map`.
+**Supported extraction functions:**
 
-Tables created through the `tables_map` options are identical as if they were created with a `create foreign table` command with a `filename` option. All other options from the `import foreign schema` are transmitted to the `create foreign table`.
+| Function | Description |
+|----------|-------------|
+| `YEAR(column)` | Extract year from DATE/TIMESTAMP |
+| `MONTH(column)` | Extract month (1-12) from DATE/TIMESTAMP |
+| `DAY(column)` | Extract day (1-31) from DATE/TIMESTAMP |
+| `column` | Use column value directly (identity) |
 
-Each table must have at least one Parquet file when created, to query Parquet field and map them to colomun names. Of course, files globbing is evaluated at query-time, so one can add files to a directory and have them considered in the query results.
+### Partition Value Handling
 
-#### Finding Parquet files from `import_parquet` function
+- **Type inference:** Numeric-looking values become integers; others become text.
+- **NULL values:** The special value `__HIVE_DEFAULT_PARTITION__` is converted to SQL NULL.
+- **URL encoding:** Values like `%20` and `%2F` are decoded automatically.
+- **Precedence:** If a column exists in both the path and the Parquet file, the path value takes precedence.
 
-Another way to import parquet files into foreign tables is to use `import_parquet` or `import_parquet_explicit`:
+## Execution Strategies
+
+The FDW automatically selects an execution strategy based on file count and options:
+
+| Strategy | When Used |
+|----------|-----------|
+| **Single File** | One file specified |
+| **Multifile** | Multiple files, processed sequentially |
+| **Multifile Merge** | Multiple pre-sorted files with `sorted` option; produces ordered results |
+| **Caching Multifile Merge** | Same as Multifile Merge, but limits open files when count exceeds `max_open_files` |
+
+## Parallel Query Execution
+
+The extension supports PostgreSQL's [parallel query execution](https://www.postgresql.org/docs/current/parallel-query.html). This is separate from Apache Arrow's multi-threaded decoding (controlled by `use_threads`).
+
+To enable parallel scans across ordered files, use:
 
 ```sql
-create function import_parquet(
-    tablename   text,
-    schemaname  text,
-    servername  text,
-    userfunc    regproc,
-    args        jsonb,
-    options     jsonb)
-
-create function import_parquet_explicit(
-    tablename   text,
-    schemaname  text,
-    servername  text,
-    attnames    text[],
-    atttypes    regtype[],
-    userfunc    regproc,
-    args        jsonb,
-    options     jsonb)
+OPTIONS (
+    filename '/data/sorted/*.parquet',
+    sorted 'date',
+    files_in_order 'true'
+)
 ```
 
-The only difference between `import_parquet` and `import_parquet_explicit` is that the latter allows to specify a set of attributes (columns) to import. `attnames` and `atttypes` here are the attributes names and attributes types arrays respectively (see the example below).
+## Schema Import
 
-`userfunc` is a user-defined function. It must take a `jsonb` argument and return a text array of filesystem paths to parquet files to be imported. `args` is user-specified jsonb object that is passed to `userfunc` as its argument. A simple implementation of such function and its usage may look like this:
+### Using IMPORT FOREIGN SCHEMA
+
+Automatically create foreign tables from Parquet files in a directory:
 
 ```sql
-create function list_parquet_files(args jsonb)
-returns text[] as
-$$
-begin
-    return array_agg(args->>'dir' || '/' || filename)
-           from pg_ls_dir(args->>'dir') as files(filename)
-           where filename ~~ '%.parquet';
-end
-$$
-language plpgsql;
+IMPORT FOREIGN SCHEMA "/path/to/data"
+FROM SERVER parquet_srv
+INTO public;
+```
 
-select import_parquet_explicit(
-    'abc',
+**Note:** The schema path must be double-quoted as it represents a filesystem path.
+
+### Import Options
+
+| Option | Type | Description |
+|--------|------|-------------|
+| `sorted` | string | Apply to all imported tables |
+| `hive_partitioning` | boolean | Enable for all imported tables |
+| `partition_map` | string | Apply same mapping to all tables |
+| `tables_map` | string | Map table names to file patterns |
+| `tables_partition_map` | string | Per-table partition mappings |
+
+### Mapping Tables to Files
+
+Use `tables_map` to specify which files belong to which table:
+
+```sql
+IMPORT FOREIGN SCHEMA "/data"
+FROM SERVER parquet_srv
+INTO public
+OPTIONS (
+    tables_map 'orders=/data/orders/**/*.parquet customers=/data/customers/*.parquet'
+);
+```
+
+**Syntax:** Space-separated `tablename=pattern` pairs. Use `:` to specify multiple patterns for one table:
+
+```sql
+OPTIONS (
+    tables_map 'sales=/data/2023/**/*.parquet:/data/2024/**/*.parquet'
+)
+```
+
+### Import with Hive Partitioning
+
+Import tables with Hive partitioning enabled and a global partition map:
+
+```sql
+IMPORT FOREIGN SCHEMA "/data/events"
+FROM SERVER parquet_srv
+INTO public
+OPTIONS (
+    hive_partitioning 'true',
+    partition_map 'year={YEAR(event_date)}, month={MONTH(event_date)}'
+);
+```
+
+### Per-Table Partition Mappings
+
+When different tables have different date column names, use `tables_partition_map`:
+
+```sql
+IMPORT FOREIGN SCHEMA "/data"
+FROM SERVER parquet_srv
+INTO public
+OPTIONS (
+    hive_partitioning 'true',
+    tables_partition_map 'orders:year={YEAR(order_date)},month={MONTH(order_date)} events:year={YEAR(event_date)},month={MONTH(event_date)}'
+);
+```
+
+**Syntax:** Space-separated `tablename:mappings` pairs. Tables not listed use the global `partition_map` if provided, or get virtual columns.
+
+### Using Import Functions
+
+For programmatic imports, use the `import_parquet` functions:
+
+```sql
+-- Import with automatic column detection
+SELECT import_parquet(
+    'my_table',           -- table name
+    'public',             -- schema
+    'parquet_srv',        -- server
+    'list_files'::regproc, -- function returning file paths
+    '{"dir": "/data"}',   -- function argument
+    '{"sorted": "date"}'  -- table options
+);
+
+-- Import with explicit columns
+SELECT import_parquet_explicit(
+    'my_table',
     'public',
     'parquet_srv',
-    array['one', 'three', 'six'],
-    array['int8', 'text', 'bool']::regtype[],
-    'list_parquet_files',
-    '{"dir": "/path/to/directory"}',
-    '{"sorted": "one"}'
+    ARRAY['id', 'name', 'value'],           -- column names
+    ARRAY['int4', 'text', 'numeric']::regtype[], -- column types
+    'list_files'::regproc,
+    '{"dir": "/data"}',
+    '{}'
 );
+```
+
+**Example file listing function:**
+
+```sql
+CREATE FUNCTION list_files(args JSONB) RETURNS TEXT[] AS $$
+BEGIN
+    RETURN ARRAY(
+        SELECT args->>'dir' || '/' || filename
+        FROM pg_ls_dir(args->>'dir') AS files(filename)
+        WHERE filename LIKE '%.parquet'
+    );
+END;
+$$ LANGUAGE plpgsql;
+```
+
+## Security
+
+By default, **only superusers** can create foreign tables, since the extension can read any file accessible to the PostgreSQL server process.
+
+### Allowing Non-Superuser Access
+
+A superuser can configure allowed directories:
+
+```sql
+ALTER SYSTEM SET parquet_fdw.allowed_directories = '/data/parquet, /data/analytics';
+SELECT pg_reload_conf();
+```
+
+### Access Model
+
+| User Type     | `allowed_directories` | Access |
+|---------------|----------------------|--------|
+| Superuser     | Any                  | All files accessible to PostgreSQL |
+| Non-superuser | Empty (default)      | **Denied** |
+| Non-superuser | Configured           | Only files within listed directories |
+
+### Security Notes
+
+- Paths are validated using `realpath()` to prevent symlink bypasses.
+- Path traversal attempts (e.g., `../`) are blocked by canonicalizing paths.
+- The `allowed_directories` setting requires superuser privileges to modify.
+- Paths returned by `files_func` are also validated against allowed directories.
+
+## Configuration
+
+### GUC Variables
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `parquet_fdw.use_threads` | true | Global toggle for Arrow's parallel decoding |
+| `parquet_fdw.enable_multifile` | true | Enable the Multifile reader |
+| `parquet_fdw.enable_multifile_merge` | true | Enable the Multifile Merge reader |
+| `parquet_fdw.allowed_directories` | (empty) | Comma-separated list of allowed directories for non-superusers |
+
+**Example:**
+
+```sql
+SET parquet_fdw.use_threads = false;
+SET parquet_fdw.enable_multifile_merge = false;
 ```
 
 ## Packaging
 
 ### Debian / Ubuntu
 
-The Makefile includes a target to create Debian packages automatically:
+The Makefile includes a target for creating Debian packages:
 
 ```sh
-# Build and install the extension first
+# Build and install the extension
 sudo make install PG_CONFIG=/usr/lib/postgresql/17/bin/pg_config
 
-# Create the Debian package for the same PostgreSQL version
+# Create the Debian package
 make debian PG_CONFIG=/usr/lib/postgresql/17/bin/pg_config
 ```
 
-This creates a package named `postgresql-17-parquet-fdw.deb` in the `Debian/` directory.
+This creates `postgresql-17-parquet-fdw.deb` in the `Debian/` directory.
 
-To build for a different PostgreSQL version, specify the appropriate `pg_config`:
+**Build for different PostgreSQL versions:**
 
 ```sh
-# For PostgreSQL 16
+# PostgreSQL 16
 make debian PG_CONFIG=/usr/lib/postgresql/16/bin/pg_config
 
-# For PostgreSQL 18
+# PostgreSQL 18
 make debian PG_CONFIG=/usr/lib/postgresql/18/bin/pg_config
 ```
 
-Install the package with:
+**Install the package:**
 
 ```sh
 sudo dpkg -i Debian/postgresql-17-parquet-fdw.deb
 ```
 
-To clean up build artifacts:
+**Clean build artifacts:**
 
 ```sh
 make debian-clean
 ```
 
-After installation, don't forget to restart the PostgreSQL server.
+After installation, restart the PostgreSQL server.
 
-## Miscelaneous
+## Additional Resources
 
-* [Synthetic documentation for developers, from AI](https://deepwiki.com/adjust/parquet_fdw)
-
+- [Synthetic documentation for developers (AI-generated)](https://deepwiki.com/adjust/parquet_fdw)

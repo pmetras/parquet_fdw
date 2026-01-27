@@ -1,0 +1,59 @@
+-- Time64 and Decimal type tests
+SET datestyle = 'ISO';
+SET client_min_messages = WARNING;
+SET log_statement TO 'none';
+
+-- Clean up any leftover objects from previous test runs
+DROP EXTENSION IF EXISTS parquet_fdw CASCADE;
+DROP ROLE IF EXISTS regress_parquet_fdw;
+
+-- Create fresh objects
+CREATE EXTENSION parquet_fdw;
+CREATE ROLE regress_parquet_fdw LOGIN SUPERUSER;
+CREATE SERVER parquet_srv FOREIGN DATA WRAPPER parquet_fdw;
+CREATE USER MAPPING FOR regress_parquet_fdw SERVER parquet_srv;
+SET ROLE regress_parquet_fdw;
+
+-- Test 1: Create foreign table with Time64 and Decimal columns
+CREATE FOREIGN TABLE time_decimal_test (
+    id INT,
+    time_us TIME,         -- Time64 microseconds
+    time_ns TIME,         -- Time64 nanoseconds (converted to microseconds)
+    price NUMERIC(10,2),  -- Decimal128
+    amount NUMERIC(18,6), -- Decimal128
+    name TEXT
+)
+SERVER parquet_srv
+OPTIONS (filename '@abs_srcdir@/data/simple/example_time_decimal.parquet');
+
+-- Test 2: Read all data
+SELECT * FROM time_decimal_test ORDER BY id;
+
+-- Test 3: Filter on TIME column
+SELECT id, time_us, name FROM time_decimal_test WHERE time_us > '12:00:00' ORDER BY id;
+
+-- Test 4: Filter on DECIMAL column
+SELECT id, price, name FROM time_decimal_test WHERE price > 100 ORDER BY id;
+
+-- Test 5: Filter on negative decimal
+SELECT id, price, amount FROM time_decimal_test WHERE price < 0 ORDER BY id;
+
+-- Test 6: Arithmetic with decimal columns (using wider precision to avoid overflow)
+SELECT id, price, amount, (price + amount)::numeric(20,2) as total FROM time_decimal_test WHERE id <= 3 ORDER BY id;
+
+-- Test 7: Aggregates on decimal columns
+SELECT SUM(price) as total_price, AVG(price) as avg_price, MIN(price) as min_price, MAX(price) as max_price FROM time_decimal_test;
+
+-- Test 8: Time comparisons
+SELECT id, time_us, time_ns FROM time_decimal_test WHERE time_us = time_ns ORDER BY id;
+
+-- Test 9: Midnight time
+SELECT id, time_us, time_ns FROM time_decimal_test WHERE time_us = '00:00:00' ORDER BY id;
+
+-- Clean up
+DROP FOREIGN TABLE time_decimal_test;
+DROP USER MAPPING FOR regress_parquet_fdw SERVER parquet_srv;
+DROP SERVER parquet_srv CASCADE;
+RESET ROLE;
+DROP ROLE regress_parquet_fdw;
+DROP EXTENSION parquet_fdw CASCADE;

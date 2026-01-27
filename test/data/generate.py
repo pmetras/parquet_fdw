@@ -248,3 +248,64 @@ for region, data in region_partitions:
         writer.write_table(table)
 
 print("Generated Hive partitioned test data in hive/")
+
+# Time64 and Decimal test data
+from datetime import time
+from decimal import Decimal as PyDecimal
+
+# Create test data for Time64 (microseconds and nanoseconds)
+# and Decimal128/Decimal256 types
+time_decimal_schema = pa.schema([
+    pa.field('id', pa.int32()),
+    pa.field('time_us', pa.time64('us')),      # Time64 in microseconds
+    pa.field('time_ns', pa.time64('ns')),      # Time64 in nanoseconds
+    pa.field('price', pa.decimal128(10, 2)),   # Decimal128 with precision 10, scale 2
+    pa.field('amount', pa.decimal128(18, 6)),  # Decimal128 with precision 18, scale 6
+    pa.field('name', pa.string()),
+])
+
+# Time values in microseconds since midnight
+# 12:30:45.123456 = (12*3600 + 30*60 + 45) * 1000000 + 123456
+time_us_values = [
+    (12 * 3600 + 30 * 60 + 45) * 1000000 + 123456,  # 12:30:45.123456
+    (8 * 3600 + 15 * 60 + 30) * 1000000 + 500000,   # 08:15:30.500000
+    (23 * 3600 + 59 * 60 + 59) * 1000000 + 999999,  # 23:59:59.999999
+    0,                                               # 00:00:00.000000
+    (18 * 3600 + 0 * 60 + 0) * 1000000,             # 18:00:00.000000
+]
+
+# Time values in nanoseconds since midnight
+time_ns_values = [
+    (12 * 3600 + 30 * 60 + 45) * 1000000000 + 123456789,  # 12:30:45.123456789
+    (8 * 3600 + 15 * 60 + 30) * 1000000000 + 500000000,   # 08:15:30.500000000
+    (23 * 3600 + 59 * 60 + 59) * 1000000000 + 999999999,  # 23:59:59.999999999
+    0,                                                     # 00:00:00.000000000
+    (18 * 3600 + 0 * 60 + 0) * 1000000000 + 1000,         # 18:00:00.000001000
+]
+
+# Create the table with explicit arrays
+time_decimal_table = pa.table({
+    'id': pa.array([1, 2, 3, 4, 5], type=pa.int32()),
+    'time_us': pa.array(time_us_values, type=pa.time64('us')),
+    'time_ns': pa.array(time_ns_values, type=pa.time64('ns')),
+    'price': pa.array([
+        PyDecimal('123.45'),
+        PyDecimal('99999999.99'),
+        PyDecimal('-50.00'),
+        PyDecimal('0.01'),
+        PyDecimal('0.00'),
+    ], type=pa.decimal128(10, 2)),
+    'amount': pa.array([
+        PyDecimal('123456.789012'),
+        PyDecimal('999999999999.999999'),
+        PyDecimal('-0.000001'),
+        PyDecimal('0.000000'),
+        PyDecimal('1.500000'),
+    ], type=pa.decimal128(18, 6)),
+    'name': pa.array(['first', 'second', 'third', 'fourth', 'fifth'], type=pa.string()),
+})
+
+with pq.ParquetWriter('simple/example_time_decimal.parquet', time_decimal_schema) as writer:
+    writer.write_table(time_decimal_table)
+
+print("Generated Time64 and Decimal test data in simple/example_time_decimal.parquet")

@@ -464,6 +464,39 @@ convert_const(Const *c, Oid dst_oid)
 }
 
 /*
+ * arrow_type_supports_statistics
+ *      Check if the given Arrow type supports row group statistics filtering.
+ *      Some types (like DECIMAL) can't reliably convert statistics bytes to Datum.
+ */
+static bool
+arrow_type_supports_statistics(const arrow::DataType *arrow_type)
+{
+    switch (arrow_type->id())
+    {
+        case arrow::Type::BOOL:
+        case arrow::Type::INT8:
+        case arrow::Type::INT16:
+        case arrow::Type::INT32:
+        case arrow::Type::INT64:
+        case arrow::Type::FLOAT:
+        case arrow::Type::DOUBLE:
+        case arrow::Type::STRING:
+        case arrow::Type::BINARY:
+        case arrow::Type::TIMESTAMP:
+        case arrow::Type::DATE32:
+        case arrow::Type::TIME64:
+        case arrow::Type::FIXED_SIZE_BINARY:
+            return true;
+        case arrow::Type::DECIMAL128:
+        case arrow::Type::DECIMAL256:
+            /* DECIMAL statistics parsing not implemented */
+            return false;
+        default:
+            return false;
+    }
+}
+
+/*
  * row_group_matches_filter
  *      Check if min/max values of the column of the row group match filter.
  */
@@ -476,6 +509,10 @@ row_group_matches_filter(parquet::Statistics *stats,
     Datum    val;
     int      collid = filter->value->constcollid;
     int      strategy = filter->strategy;
+
+    /* Check if this type supports statistics filtering */
+    if (!arrow_type_supports_statistics(arrow_type))
+        return true;  /* Can't filter, don't exclude any row groups */
 
     if (arrow_type->id() == arrow::Type::MAP && filter->is_key)
     {

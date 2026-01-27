@@ -187,6 +187,7 @@ protected:
             int16       len;    /*                         */
             bool        byval;  /* Only for array elements */
             char        align;  /*                         */
+            int32       typmod; /* Type modifier (precision/scale for NUMERIC) */
         } pg;
 
         /*
@@ -211,16 +212,22 @@ protected:
         /* Cached UUID detection to avoid per-row checks */
         bool            is_uuid;
 
+        /* Flag to emit DECIMAL precision warning only once per column */
+        mutable bool    decimal_precision_warned;
+
         TypeInfo()
             : arrow{}, pg{}, need_cast(false),
               castfunc(nullptr), outfunc(nullptr), infunc(nullptr), index(-1),
-              is_uuid(false)
-        {}
+              is_uuid(false), decimal_precision_warned(false)
+        {
+            pg.typmod = -1;  /* -1 means no modifier */
+        }
 
         TypeInfo(TypeInfo &&ti)
             : arrow(ti.arrow), pg(ti.pg), need_cast(ti.need_cast),
               castfunc(ti.castfunc), outfunc(ti.outfunc), infunc(ti.infunc),
-              children(std::move(ti.children)), index(-1), is_uuid(ti.is_uuid)
+              children(std::move(ti.children)), index(-1), is_uuid(ti.is_uuid),
+              decimal_precision_warned(ti.decimal_precision_warned)
         {}
 
         TypeInfo(std::shared_ptr<arrow::DataType> arrow_type, Oid typid=InvalidOid)
