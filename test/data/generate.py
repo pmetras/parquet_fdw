@@ -309,3 +309,74 @@ with pq.ParquetWriter('simple/example_time_decimal.parquet', time_decimal_schema
     writer.write_table(time_decimal_table)
 
 print("Generated Time64 and Decimal test data in simple/example_time_decimal.parquet")
+
+# Test data for IMPORT FOREIGN SCHEMA with tables_partition_map
+# Creates two tables with different date columns but same partition structure:
+#   hive/import_test/table1/year=YYYY/month=M/data.parquet (contains event_date)
+#   hive/import_test/table2/year=YYYY/month=M/data.parquet (contains data_date)
+
+# table1: has event_date column
+table1_schema = pa.schema([
+    pa.field('id', pa.int64()),
+    pa.field('event_date', pa.date32()),
+    pa.field('value', pa.float64()),
+])
+
+table1_partitions = [
+    ('2023', '1', [
+        {'id': 1, 'event_date': date(2023, 1, 15), 'value': 100.0},
+        {'id': 2, 'event_date': date(2023, 1, 20), 'value': 200.0},
+    ]),
+    ('2023', '6', [
+        {'id': 3, 'event_date': date(2023, 6, 10), 'value': 150.0},
+        {'id': 4, 'event_date': date(2023, 6, 25), 'value': 250.0},
+    ]),
+    ('2024', '3', [
+        {'id': 5, 'event_date': date(2024, 3, 5), 'value': 175.0},
+        {'id': 6, 'event_date': date(2024, 3, 28), 'value': 225.0},
+    ]),
+]
+
+for year, month, data in table1_partitions:
+    dir_path = f'hive/import_test/table1/year={year}/month={month}'
+    os.makedirs(dir_path, exist_ok=True)
+
+    df = pd.DataFrame(data)
+    table = pa.Table.from_pandas(df, schema=table1_schema, preserve_index=False)
+
+    with pq.ParquetWriter(f'{dir_path}/data.parquet', table1_schema) as writer:
+        writer.write_table(table)
+
+# table2: has data_date column (different column name)
+table2_schema = pa.schema([
+    pa.field('id', pa.int64()),
+    pa.field('data_date', pa.date32()),
+    pa.field('amount', pa.float64()),
+])
+
+table2_partitions = [
+    ('2023', '2', [
+        {'id': 101, 'data_date': date(2023, 2, 10), 'amount': 1000.0},
+        {'id': 102, 'data_date': date(2023, 2, 28), 'amount': 2000.0},
+    ]),
+    ('2023', '8', [
+        {'id': 103, 'data_date': date(2023, 8, 15), 'amount': 1500.0},
+        {'id': 104, 'data_date': date(2023, 8, 30), 'amount': 2500.0},
+    ]),
+    ('2024', '5', [
+        {'id': 105, 'data_date': date(2024, 5, 1), 'amount': 1750.0},
+        {'id': 106, 'data_date': date(2024, 5, 20), 'amount': 2250.0},
+    ]),
+]
+
+for year, month, data in table2_partitions:
+    dir_path = f'hive/import_test/table2/year={year}/month={month}'
+    os.makedirs(dir_path, exist_ok=True)
+
+    df = pd.DataFrame(data)
+    table = pa.Table.from_pandas(df, schema=table2_schema, preserve_index=False)
+
+    with pq.ParquetWriter(f'{dir_path}/data.parquet', table2_schema) as writer:
+        writer.write_table(table)
+
+print("Generated import_test tables with different date columns in hive/import_test/")

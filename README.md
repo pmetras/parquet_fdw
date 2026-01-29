@@ -156,14 +156,15 @@ OPTIONS (
 
 ## File Patterns and Globbing
 
-The `filename` option supports glob patterns for matching multiple files:
+The `filename` option supports POSIX glob patterns for matching multiple files:
 
 | Pattern | Description | Example |
 |---------|-------------|---------|
-| `*` | Match any characters | `/data/*.parquet` |
-| `**` | Match directories recursively | `/data/**/*.parquet` |
+| `*` | Match any characters in a path component | `/data/*.parquet` |
 | `?` | Match single character | `/data/file?.parquet` |
-| `{a,b}` | Match alternatives | `/data/{2023,2024}/*.parquet` |
+| `{a,b}` | Match alternatives (brace expansion) | `/data/{2023,2024}/*.parquet` |
+
+**Note:** The recursive pattern `**` (globstar) is NOT supported by POSIX glob. Use explicit wildcards for each directory level instead (e.g., `year=*/month=*/*.parquet`).
 
 **Examples:**
 
@@ -171,11 +172,11 @@ The `filename` option supports glob patterns for matching multiple files:
 -- All Parquet files in a directory
 OPTIONS (filename '/data/sales/*.parquet')
 
--- Recursive search
-OPTIONS (filename '/data/**/*.parquet')
+-- Match files in Hive partition directories
+OPTIONS (filename '/data/year=*/month=*/*.parquet')
 
 -- Specific years using brace expansion
-OPTIONS (filename '/data/year={2023,2024}/**/*.parquet')
+OPTIONS (filename '/data/year={2023,2024}/month=*/*.parquet')
 
 -- Multiple directories (space-separated)
 OPTIONS (filename '/data/2023/*.parquet /data/2024/*.parquet')
@@ -207,7 +208,7 @@ CREATE FOREIGN TABLE sales (
 )
 SERVER parquet_srv
 OPTIONS (
-    filename '/data/sales/**/*.parquet',
+    filename '/data/sales/year=*/month=*/*.parquet',
     hive_partitioning 'true'
 );
 ```
@@ -230,7 +231,7 @@ Override automatic partition column detection:
 
 ```sql
 OPTIONS (
-    filename '/data/sales/**/*.parquet',
+    filename '/data/sales/year=*/month=*/*.parquet',
     hive_partitioning 'true',
     partition_columns 'year month'
 )
@@ -251,7 +252,7 @@ CREATE FOREIGN TABLE events (
 )
 SERVER parquet_srv
 OPTIONS (
-    filename '/data/events/**/*.parquet',
+    filename '/data/events/year=*/month=*/*.parquet',
     hive_partitioning 'true',
     partition_map 'year={YEAR(event_date)}, month={MONTH(event_date)}'
 );
@@ -337,7 +338,7 @@ IMPORT FOREIGN SCHEMA "/data"
 FROM SERVER parquet_srv
 INTO public
 OPTIONS (
-    tables_map 'orders=/data/orders/**/*.parquet customers=/data/customers/*.parquet'
+    tables_map 'orders=/data/orders/*.parquet customers=/data/customers/*.parquet'
 );
 ```
 
@@ -345,7 +346,7 @@ OPTIONS (
 
 ```sql
 OPTIONS (
-    tables_map 'sales=/data/2023/**/*.parquet:/data/2024/**/*.parquet'
+    tables_map 'sales=/data/sales/year=2023/month=*/*.parquet:/data/sales/year=2024/month=*/*.parquet'
 )
 ```
 
@@ -379,7 +380,7 @@ FROM SERVER parquet_srv
 INTO public
 OPTIONS (
     hive_partitioning 'true',
-    tables_map 'table1=/data/table1/**/*.parquet table2=/data/table2/**/*.parquet',
+    tables_map 'table1=/data/table1/year=*/month=*/*.parquet table2=/data/table2/year=*/month=*/*.parquet',
     tables_partition_map 'table1:year={YEAR(event_date)},month={MONTH(event_date)} table2:year={YEAR(data_date)},month={MONTH(data_date)}'
 );
 ```

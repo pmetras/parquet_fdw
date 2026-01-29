@@ -82,6 +82,42 @@ FROM hive_basic
 WHERE year = 2023
 GROUP BY year;
 
+-- Test 5: IMPORT FOREIGN SCHEMA with tables_map and tables_partition_map
+-- Two tables with different date columns but same partition structure
+-- table1 has event_date, table2 has data_date
+-- Note: glob() doesn't support ** (globstar), so we use year=*/month=*/*.parquet
+
+IMPORT FOREIGN SCHEMA "@abs_srcdir@/data/hive/import_test"
+FROM SERVER parquet_srv
+INTO public
+OPTIONS (
+    hive_partitioning 'true',
+    tables_map 'table1=@abs_srcdir@/data/hive/import_test/table1/year=*/month=*/*.parquet table2=@abs_srcdir@/data/hive/import_test/table2/year=*/month=*/*.parquet',
+    tables_partition_map 'table1:year={YEAR(event_date)},month={MONTH(event_date)} table2:year={YEAR(data_date)},month={MONTH(data_date)}'
+);
+
+-- Verify table1 was created and data is accessible
+SELECT * FROM table1 ORDER BY id;
+
+-- Verify table2 was created and data is accessible
+SELECT * FROM table2 ORDER BY id;
+
+-- Test partition pruning on table1 using event_date
+-- Should only scan year=2023 partitions
+SELECT id, event_date, value FROM table1 WHERE event_date >= '2023-01-01' AND event_date < '2024-01-01' ORDER BY id;
+
+-- Test partition pruning on table2 using data_date
+-- Should only scan year=2024 partition
+SELECT id, data_date, amount FROM table2 WHERE data_date >= '2024-01-01' ORDER BY id;
+
+-- Verify EXPLAIN shows the tables
+EXPLAIN (COSTS OFF) SELECT * FROM table1 WHERE event_date = '2023-01-15';
+EXPLAIN (COSTS OFF) SELECT * FROM table2 WHERE data_date = '2024-05-01';
+
+-- Clean up imported tables
+DROP FOREIGN TABLE table1;
+DROP FOREIGN TABLE table2;
+
 -- Clean up
 DROP FOREIGN TABLE hive_basic;
 DROP FOREIGN TABLE hive_region;

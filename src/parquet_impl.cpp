@@ -2656,9 +2656,23 @@ add_create_foreign_table(List *cmds, ImportForeignSchemaStmt *stmt, char *tablen
     }
 
     /*
-     * Build modified options list that includes hive_partitioning and partition_map
+     * Build modified options list that includes hive_partitioning and partition_map.
+     * First, copy options but skip those we'll add/modify (to avoid duplicates).
      */
-    List *modified_options = list_copy(stmt->options);
+    List *modified_options = NIL;
+    foreach(lc, stmt->options)
+    {
+        DefElem *def = (DefElem *) lfirst(lc);
+        /* Skip options we'll handle separately */
+        if (strcmp(def->defname, "hive_partitioning") == 0 ||
+            strcmp(def->defname, "partition_map") == 0 ||
+            strcmp(def->defname, "tables_map") == 0 ||
+            strcmp(def->defname, "tables_partition_map") == 0)
+            continue;
+        modified_options = lappend(modified_options, def);
+    }
+
+    /* Now add the partition-related options */
     if (hive_partitioning)
     {
         modified_options = lappend(modified_options,
