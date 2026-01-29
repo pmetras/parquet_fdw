@@ -11,6 +11,8 @@
 extern "C"
 {
 #include "postgres.h"
+#include "utils/date.h"
+#include "utils/timestamp.h"
 #include "utils/jsonb.h"
 }
 
@@ -190,5 +192,10 @@ std::string url_decode(const std::string &encoded);
 
 /* Check if a value represents the Hive NULL partition */
 bool is_hive_null_partition(const char *value);
+
+/* Date helper functions for partition pruning */
+void date_to_ymd(DateADT date, int *year, int *month, int *day);
+void timestamp_to_ymd(Timestamp ts, int *year, int *month, int *day);
+DateADT date_to_adt(int year, int month, int day);
 
 #endif

@@ -698,7 +698,7 @@ parse_partition_map(const char *map_str)
 /*
  * Helper function to extract year/month/day from a PostgreSQL DateADT.
  */
-static void
+void
 date_to_ymd(DateADT date, int *year, int *month, int *day)
 {
     julian_to_ymd(date + POSTGRES_EPOCH_JDATE, year, month, day);
@@ -708,7 +708,7 @@ date_to_ymd(DateADT date, int *year, int *month, int *day)
  * Helper function to extract year/month/day from a PostgreSQL Timestamp.
  * Converts timestamp to date first, then extracts components.
  */
-static void
+void
 timestamp_to_ymd(Timestamp ts, int *year, int *month, int *day)
 {
     /*
@@ -724,6 +724,15 @@ timestamp_to_ymd(Timestamp ts, int *year, int *month, int *day)
         date_val = (ts - INT64CONST(86400000000) + 1) / INT64CONST(86400000000);
 
     julian_to_ymd(static_cast<int>(date_val) + POSTGRES_EPOCH_JDATE, year, month, day);
+}
+
+/*
+ * Helper function to convert year/month/day to a PostgreSQL DateADT.
+ */
+DateADT
+date_to_adt(int year, int month, int day)
+{
+    return ymd_to_julian(year, month, day) - POSTGRES_EPOCH_JDATE;
 }
 
 /*

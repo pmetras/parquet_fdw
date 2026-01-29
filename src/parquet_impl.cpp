@@ -215,6 +215,215 @@ partition_matches_filter(const HivePartitionValue &pv, const RowGroupFilter &fil
 }
 
 /*
+ * get_days_in_month
+ *      Return the number of days in a given month/year.
+ */
+static int
+get_days_in_month(int year, int month)
+{
+    static const int days[] = {31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31};
+    if (month < 1 || month > 12)
+        return 31;
+    if (month == 2)
+    {
+        /* Leap year check */
+        if ((year % 4 == 0 && year % 100 != 0) || (year % 400 == 0))
+            return 29;
+    }
+    return days[month - 1];
+}
+
+/*
+ * mapped_column_allows_pruning
+ *      Check if a filter on a mapped column allows pruning this file.
+ *      Returns true if the file can be PRUNED (does NOT match the filter).
+ *
+ *      For example, with partition_map 'year={YEAR(event_date)}, month={MONTH(event_date)}':
+ *      - Filter: event_date >= '2025-06-01'
+ *      - File partition: year=2023, month=07
+ *      - The file contains dates from 2023-07-01 to 2023-07-31
+ *      - Since 2023-07-31 < 2025-06-01, no dates in this file can match
+ *      - Therefore, we can PRUNE this file (return true)
+ */
+static bool
+mapped_column_allows_pruning(const char *filename,
+                             const std::vector<HivePartitionValue> &partitions,
+                             const RowGroupFilter &filter,
+                             TupleDesc tupleDesc,
+                             const std::vector<HivePartitionMapping> &mappings)
+{
+    /* Get the filter column name */
+    AttrNumber attnum = filter.attnum;
+    if (attnum < 1 || attnum > tupleDesc->natts)
+        return false;
+
+    Form_pg_attribute attr = TupleDescAttr(tupleDesc, attnum - 1);
+    char colname[NAMEDATALEN];
+    tolowercase(NameStr(attr->attname), colname);
+
+    /* Check if filter constant is valid */
+    if (filter.value->constisnull)
+        return false;
+
+    Oid filter_type = attr->atttypid;
+
+    /* Only handle DATE and TIMESTAMP types for now */
+    if (filter_type != DATEOID && filter_type != TIMESTAMPOID && filter_type != TIMESTAMPTZOID)
+    {
+        elog(DEBUG2, "parquet_fdw: mapped column %s has unsupported type %u for pruning",
+             colname, filter_type);
+        return false;
+    }
+
+    /* Find all mappings for this column */
+    int partition_year = -1;
+    int partition_month = -1;
+    int partition_day = -1;
+    bool found_mapping = false;
+
+    for (const auto &mapping : mappings)
+    {
+        if (mapping.column_name != colname)
+            continue;
+
+        found_mapping = true;
+
+        /* Find the partition value for this mapping's partition key */
+        for (const auto &pv : partitions)
+        {
+            if (pv.key == mapping.partition_key && !pv.isnull)
+            {
+                int val = std::stoi(pv.value);
+                switch (mapping.func)
+                {
+                    case PEF_YEAR:
+                        partition_year = val;
+                        elog(DEBUG2, "parquet_fdw: file %s partition year=%d from key %s",
+                             filename, partition_year, mapping.partition_key.c_str());
+                        break;
+                    case PEF_MONTH:
+                        partition_month = val;
+                        elog(DEBUG2, "parquet_fdw: file %s partition month=%d from key %s",
+                             filename, partition_month, mapping.partition_key.c_str());
+                        break;
+                    case PEF_DAY:
+                        partition_day = val;
+                        elog(DEBUG2, "parquet_fdw: file %s partition day=%d from key %s",
+                             filename, partition_day, mapping.partition_key.c_str());
+                        break;
+                    default:
+                        break;
+                }
+            }
+        }
+    }
+
+    if (!found_mapping)
+    {
+        elog(DEBUG2, "parquet_fdw: no partition mapping found for column %s", colname);
+        return false;
+    }
+
+    if (partition_year < 0)
+    {
+        elog(DEBUG2, "parquet_fdw: no year partition found for column %s", colname);
+        return false;
+    }
+
+    /* Default month to full year range if not partitioned by month */
+    int month_min = (partition_month > 0) ? partition_month : 1;
+    int month_max = (partition_month > 0) ? partition_month : 12;
+
+    /* Calculate the date range covered by this partition */
+    int day_min = (partition_day > 0) ? partition_day : 1;
+    int day_max = (partition_day > 0) ? partition_day : get_days_in_month(partition_year, month_max);
+
+    /* Construct min and max dates for this partition as PostgreSQL dates */
+    DateADT partition_min_date = date_to_adt(partition_year, month_min, day_min);
+    DateADT partition_max_date = date_to_adt(partition_year, month_max, day_max);
+
+    elog(DEBUG2, "parquet_fdw: file %s partition date range: %04d-%02d-%02d to %04d-%02d-%02d",
+         filename, partition_year, month_min, day_min, partition_year, month_max, day_max);
+
+    /* Extract the filter date value */
+    DateADT filter_date;
+    if (filter_type == DATEOID)
+    {
+        filter_date = DatumGetDateADT(filter.value->constvalue);
+    }
+    else
+    {
+        /* Convert timestamp to date */
+        int fyear, fmonth, fday;
+        timestamp_to_ymd(DatumGetTimestamp(filter.value->constvalue), &fyear, &fmonth, &fday);
+        filter_date = date_to_adt(fyear, fmonth, fday);
+    }
+
+    int fyear, fmonth, fday;
+    date_to_ymd(filter_date, &fyear, &fmonth, &fday);
+    elog(DEBUG2, "parquet_fdw: filter date: %04d-%02d-%02d, strategy: %d",
+         fyear, fmonth, fday, filter.strategy);
+
+    /*
+     * Compare partition date range against filter value.
+     * We can prune if NO date in the partition range can satisfy the filter.
+     *
+     * For >= filter: prune if partition_max < filter_value (no date in partition can be >= filter)
+     * For >  filter: prune if partition_max <= filter_value
+     * For <= filter: prune if partition_min > filter_value (no date in partition can be <= filter)
+     * For <  filter: prune if partition_min >= filter_value
+     * For =  filter: prune if filter_value < partition_min OR filter_value > partition_max
+     */
+    bool can_prune = false;
+    const char *reason = nullptr;
+
+    switch (filter.strategy)
+    {
+        case BTGreaterEqualStrategyNumber:  /* >= */
+            can_prune = (partition_max_date < filter_date);
+            reason = "partition max < filter (for >=)";
+            break;
+
+        case BTGreaterStrategyNumber:  /* > */
+            can_prune = (partition_max_date <= filter_date);
+            reason = "partition max <= filter (for >)";
+            break;
+
+        case BTLessEqualStrategyNumber:  /* <= */
+            can_prune = (partition_min_date > filter_date);
+            reason = "partition min > filter (for <=)";
+            break;
+
+        case BTLessStrategyNumber:  /* < */
+            can_prune = (partition_min_date >= filter_date);
+            reason = "partition min >= filter (for <)";
+            break;
+
+        case BTEqualStrategyNumber:  /* = */
+            can_prune = (filter_date < partition_min_date || filter_date > partition_max_date);
+            reason = "filter date outside partition range (for =)";
+            break;
+
+        default:
+            can_prune = false;
+            break;
+    }
+
+    if (can_prune)
+    {
+        elog(DEBUG1, "parquet_fdw: file %s PRUNED by mapped column %s: %s",
+             filename, colname, reason);
+    }
+    else
+    {
+        elog(DEBUG2, "parquet_fdw: file %s NOT pruned by mapped column %s",
+             filename, colname);
+    }
+
+    return can_prune;
+}
+
+/*
  * file_matches_partition_filters
  *      Check if a file's partition values satisfy all applicable filters.
  *      Returns true if the file should be included (passes all filters).
@@ -222,23 +431,55 @@ partition_matches_filter(const HivePartitionValue &pv, const RowGroupFilter &fil
 static bool
 file_matches_partition_filters(const char *filename,
                                const std::list<RowGroupFilter> &filters,
-                               TupleDesc tupleDesc)
+                               TupleDesc tupleDesc,
+                               const std::vector<HivePartitionMapping> *mappings)
 {
     /* Extract partition values from the file path */
     auto partitions = extract_hive_partitions(filename);
     if (partitions.empty())
+    {
+        elog(DEBUG2, "parquet_fdw: file %s has no partitions in path", filename);
         return true;  /* no partitions to filter on */
+    }
 
-    /* Check each filter against each partition value */
+    elog(DEBUG2, "parquet_fdw: checking file %s with %zu partitions, %zu filters, mappings=%s",
+         filename, partitions.size(), filters.size(),
+         (mappings && !mappings->empty()) ? "yes" : "no");
+
+    /* Check each filter */
     for (const auto &filter : filters)
     {
+        /* First, try direct partition key matching (existing logic) */
+        bool direct_match_found = false;
         for (const auto &pv : partitions)
         {
-            if (!partition_matches_filter(pv, filter, tupleDesc))
+            /* Check if filter column name matches partition key */
+            AttrNumber attnum = filter.attnum;
+            if (attnum >= 1 && attnum <= tupleDesc->natts)
             {
-                elog(DEBUG1, "parquet_fdw: file %s pruned by partition %s=%s",
-                     filename, pv.key.c_str(), pv.value.c_str());
-                return false;
+                Form_pg_attribute attr = TupleDescAttr(tupleDesc, attnum - 1);
+                char colname[NAMEDATALEN];
+                tolowercase(NameStr(attr->attname), colname);
+
+                if (pv.key == colname)
+                {
+                    direct_match_found = true;
+                    if (!partition_matches_filter(pv, filter, tupleDesc))
+                    {
+                        elog(DEBUG1, "parquet_fdw: file %s pruned by direct partition %s=%s",
+                             filename, pv.key.c_str(), pv.value.c_str());
+                        return false;
+                    }
+                }
+            }
+        }
+
+        /* If no direct match and we have mappings, try mapped column pruning */
+        if (!direct_match_found && mappings && !mappings->empty())
+        {
+            if (mapped_column_allows_pruning(filename, partitions, filter, tupleDesc, *mappings))
+            {
+                return false;  /* File pruned by mapped column filter */
             }
         }
     }
@@ -1579,13 +1820,27 @@ get_table_options(Oid relid, ParquetFdwPlanState *fdw_private)
     /* Parse partition_map if provided */
     if (fdw_private->hive_partitioning && fdw_private->partition_map)
     {
+        elog(DEBUG2, "parquet_fdw: parsing partition_map: %s", fdw_private->partition_map);
         try {
             fdw_private->partition_mappings = new std::vector<HivePartitionMapping>(
                 parse_partition_map(fdw_private->partition_map));
+            elog(DEBUG2, "parquet_fdw: parsed %zu partition mappings",
+                 fdw_private->partition_mappings->size());
+            for (const auto &m : *fdw_private->partition_mappings)
+            {
+                elog(DEBUG2, "parquet_fdw: mapping: %s -> %s (func=%d)",
+                     m.partition_key.c_str(), m.column_name.c_str(), (int)m.func);
+            }
         }
         catch (const std::exception &e) {
             elog(ERROR, "parquet_fdw: %s", e.what());
         }
+    }
+    else
+    {
+        elog(DEBUG2, "parquet_fdw: hive_partitioning=%d, partition_map=%s",
+             fdw_private->hive_partitioning,
+             fdw_private->partition_map ? fdw_private->partition_map : "(null)");
     }
 }
 
@@ -1635,7 +1890,8 @@ parquetGetForeignRelSize(PlannerInfo *root,
          * eliminate entire files without opening them.
          */
         if (fdw_private->hive_partitioning &&
-            !file_matches_partition_filters(filename, filters, tupleDesc))
+            !file_matches_partition_filters(filename, filters, tupleDesc,
+                                            fdw_private->partition_mappings))
         {
             /* File pruned by partition filter */
             continue;
