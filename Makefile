@@ -99,7 +99,7 @@ PKG_EXTDIR := $(PKG_DIR)/usr/share/postgresql/$(PG_VERSION)/extension
 PKG_ARCH := $(shell dpkg --print-architecture)
 PKG_FILENAME := $(PKG_NAME)_$(PKG_VERSION)_$(PKG_ARCH).deb
 # Detect Arrow library version from pkg-config (e.g., 18.0.0 -> 1800)
-ARROW_VERSION := $(shell pkg-config --modversion arrow 2>/dev/null | sed 's/\([0-9]*\)\.\([0-9]*\).*/\1\200/')
+ARROW_VERSION := $(shell pkg-config --modversion arrow 2>/dev/null | awk -F. '{printf "%d%02d", $$1, $$2}')
 ARROW_PKG := $(if $(ARROW_VERSION),libarrow$(ARROW_VERSION),libarrow-dev)
 PARQUET_PKG := $(if $(ARROW_VERSION),libparquet$(ARROW_VERSION),libparquet-dev)
 # Git revision for build info (optional)
