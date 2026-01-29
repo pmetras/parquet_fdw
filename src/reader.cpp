@@ -129,7 +129,7 @@ public:
                 throw std::runtime_error("garbage segments recycle failed");
 
             this->garbage_segments.clear();
-            elog(DEBUG1, "parquet_fdw: garbage segments recycled");
+            elog(DEBUG2, "parquet_fdw: garbage segments recycled");
         }
     }
 
@@ -580,7 +580,7 @@ Datum ParquetReader::read_primitive_type(arrow::Array *array,
             {
                 const uint8_t *value = binarray->GetValue(i);
 
-                elog(DEBUG1, "parquet_fdw: Reading UUID from FIXED_SIZE_BINARY: %02x%02x%02x%02x-%02x%02x-%02x%02x-%02x%02x-%02x%02x%02x%02x%02x%02x",
+                elog(DEBUG3, "parquet_fdw: Reading UUID from FIXED_SIZE_BINARY: %02x%02x%02x%02x-%02x%02x-%02x%02x-%02x%02x-%02x%02x%02x%02x%02x%02x",
                     value[0], value[1], value[2], value[3], value[4], value[5], value[6], value[7],
                     value[8], value[9], value[10], value[11], value[12], value[13], value[14], value[15]
                 );
@@ -590,7 +590,7 @@ Datum ParquetReader::read_primitive_type(arrow::Array *array,
             }
             else
             {
-                elog(DEBUG1, "parquet_fdw: Reading actual FIXED_SIZE_BINARY");
+                elog(DEBUG3, "parquet_fdw: Reading actual FIXED_SIZE_BINARY");
                 const int32_t vallen = binarray->byte_width();
                 const uint8_t *value = binarray->GetValue(i);
 
@@ -613,7 +613,7 @@ Datum ParquetReader::read_primitive_type(arrow::Array *array,
 
             if (typinfo.is_uuid)
             {
-                elog(DEBUG1, "parquet_fdw: Reading UUID from EXTENSION: %02x%02x%02x%02x-%02x%02x-%02x%02x-%02x%02x-%02x%02x%02x%02x%02x%02x",
+                elog(DEBUG3, "parquet_fdw: Reading UUID from EXTENSION: %02x%02x%02x%02x-%02x%02x-%02x%02x-%02x%02x-%02x%02x%02x%02x%02x%02x",
                     value[0], value[1], value[2], value[3], value[4], value[5], value[6], value[7],
                     value[8], value[9], value[10], value[11], value[12], value[13], value[14], value[15]
                 );
@@ -1003,7 +1003,7 @@ void ParquetReader::set_partition_values(const std::vector<HivePartitionValue> &
                 this->partition_columns[i].isnull = isnull;
                 this->partition_columns[i].key = pv.key;
 
-                elog(DEBUG1, "parquet_fdw: mapped partition column %s=%s to attribute %d",
+                elog(DEBUG2, "parquet_fdw: mapped partition column %s=%s to attribute %d",
                      pv.key.c_str(), pv.value.c_str(), i);
                 break;
             }
