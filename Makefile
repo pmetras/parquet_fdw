@@ -79,25 +79,31 @@ $(TEST_EXPECTED): test/expected/%.out: test/expected/%.out.in
 # Debian package creation
 # Usage: make debian [PG_CONFIG=/path/to/pg_config]
 #
-# Package naming: postgresql-<PGVER>-parquet-fdw_<VERSION>+<GITREV>_<ARCH>.deb
-# Example: postgresql-17-parquet-fdw_0.2+g1a2b3c4_amd64.deb
+# Package naming: postgresql-<PGVER>-parquet-fdw_<VERSION>.<TIMESTAMP>_<ARCH>.deb
+# Example: postgresql-17-parquet-fdw_0.2.20260129163000_amd64.deb
 #
-# The git revision (or timestamp if not in a git repo) ensures each build
-# produces a uniquely named package for tracking purposes.
+# The timestamp ensures each build produces a uniquely named package that
+# sorts chronologically for easy tracking.
 
 PG_VERSION := $(shell $(PG_CONFIG) --version | sed 's/PostgreSQL \([0-9]*\).*/\1/')
 PG_PKGLIBDIR := $(shell $(PG_CONFIG) --pkglibdir)
 PG_SHAREDIR := $(shell $(PG_CONFIG) --sharedir)
 PKG_NAME := postgresql-$(PG_VERSION)-parquet-fdw
 PKG_BASE_VERSION := 0.2
-# Use git short hash if available, otherwise use timestamp
-PKG_GIT_REV := $(shell git rev-parse --short HEAD 2>/dev/null || date +%Y%m%d%H%M%S)
-PKG_VERSION := $(PKG_BASE_VERSION)+g$(PKG_GIT_REV)
+# Use timestamp for monotonically increasing version numbers
+PKG_TIMESTAMP := $(shell date +%Y%m%d%H%M%S)
+PKG_VERSION := $(PKG_BASE_VERSION).$(PKG_TIMESTAMP)
 PKG_DIR := Debian/$(PKG_NAME)
 PKG_LIBDIR := $(PKG_DIR)/usr/lib/postgresql/$(PG_VERSION)/lib
 PKG_EXTDIR := $(PKG_DIR)/usr/share/postgresql/$(PG_VERSION)/extension
 PKG_ARCH := $(shell dpkg --print-architecture)
 PKG_FILENAME := $(PKG_NAME)_$(PKG_VERSION)_$(PKG_ARCH).deb
+# Detect Arrow library version from pkg-config (e.g., 18.0.0 -> 1800)
+ARROW_VERSION := $(shell pkg-config --modversion arrow 2>/dev/null | sed 's/\([0-9]*\)\.\([0-9]*\).*/\1\200/')
+ARROW_PKG := $(if $(ARROW_VERSION),libarrow$(ARROW_VERSION),libarrow-dev)
+PARQUET_PKG := $(if $(ARROW_VERSION),libparquet$(ARROW_VERSION),libparquet-dev)
+# Git revision for build info (optional)
+PKG_GIT_REV := $(shell git rev-parse --short HEAD 2>/dev/null)
 
 .PHONY: debian debian-clean
 
@@ -140,7 +146,7 @@ debian: all
 	@echo "Priority: optional" >> $(PKG_DIR)/DEBIAN/control
 	@echo "Architecture: $(PKG_ARCH)" >> $(PKG_DIR)/DEBIAN/control
 	@echo "Maintainer: Pierre Métras <p.metras@nfb.ca>" >> $(PKG_DIR)/DEBIAN/control
-	@echo "Depends: postgresql-$(PG_VERSION), libarrow1800, libparquet1800" >> $(PKG_DIR)/DEBIAN/control
+	@echo "Depends: postgresql-$(PG_VERSION), $(ARROW_PKG), $(PARQUET_PKG)" >> $(PKG_DIR)/DEBIAN/control
 	@echo "Conflicts: postgresql-parquet-fdw" >> $(PKG_DIR)/DEBIAN/control
 	@echo "Replaces: postgresql-parquet-fdw" >> $(PKG_DIR)/DEBIAN/control
 	@echo "Description: Apache Parquet foreign data wrapper for PostgreSQL $(PG_VERSION)" >> $(PKG_DIR)/DEBIAN/control
@@ -152,7 +158,11 @@ debian: all
 	@echo "  - Hive-style partitioning with partition pruning" >> $(PKG_DIR)/DEBIAN/control
 	@echo "  - Parallel query execution" >> $(PKG_DIR)/DEBIAN/control
 	@echo " ." >> $(PKG_DIR)/DEBIAN/control
-	@echo " Built from git revision: $(PKG_GIT_REV)" >> $(PKG_DIR)/DEBIAN/control
+	@if [ -n "$(PKG_GIT_REV)" ]; then \
+		echo " Built: $(PKG_TIMESTAMP) (git: $(PKG_GIT_REV))" >> $(PKG_DIR)/DEBIAN/control; \
+	else \
+		echo " Built: $(PKG_TIMESTAMP)" >> $(PKG_DIR)/DEBIAN/control; \
+	fi
 	@echo " See https://github.com/pmetras/parquet_fdw" >> $(PKG_DIR)/DEBIAN/control
 	# Build the package with versioned filename
 	dpkg-deb --build --root-owner-group $(PKG_DIR)
@@ -162,6 +172,7 @@ debian: all
 	@echo "  PostgreSQL version: $(PG_VERSION)"
 	@echo "  Package version: $(PKG_VERSION)"
 	@echo "  Architecture: $(PKG_ARCH)"
+	@echo "  Dependencies: $(ARROW_PKG), $(PARQUET_PKG)"
 
 debian-clean:
 	rm -rf Debian/postgresql-*-parquet-fdw

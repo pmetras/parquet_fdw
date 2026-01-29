@@ -499,12 +499,12 @@ make debian PG_CONFIG=/usr/lib/postgresql/17/bin/pg_config
 
 This creates a versioned package in the `Debian/` directory with the naming format:
 ```
-postgresql-<PGVER>-parquet-fdw_<VERSION>+g<GITREV>_<ARCH>.deb
+postgresql-<PGVER>-parquet-fdw_<VERSION>.<TIMESTAMP>_<ARCH>.deb
 ```
 
-For example: `postgresql-17-parquet-fdw_0.2+g1a2b3c4_amd64.deb`
+For example: `postgresql-17-parquet-fdw_0.2.20260129163000_amd64.deb`
 
-The package version includes the git commit hash (or timestamp if not in a git repo) to uniquely identify each build for tracking purposes.
+The package version includes a timestamp (YYYYMMDDHHMMSS) to uniquely identify each build. Timestamps are monotonically increasing, making it easy to sort and track package revisions.
 
 **Build for different PostgreSQL versions:**
 
