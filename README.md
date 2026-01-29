@@ -497,7 +497,14 @@ sudo make install PG_CONFIG=/usr/lib/postgresql/17/bin/pg_config
 make debian PG_CONFIG=/usr/lib/postgresql/17/bin/pg_config
 ```
 
-This creates `postgresql-17-parquet-fdw.deb` in the `Debian/` directory.
+This creates a versioned package in the `Debian/` directory with the naming format:
+```
+postgresql-<PGVER>-parquet-fdw_<VERSION>+g<GITREV>_<ARCH>.deb
+```
+
+For example: `postgresql-17-parquet-fdw_0.2+g1a2b3c4_amd64.deb`
+
+The package version includes the git commit hash (or timestamp if not in a git repo) to uniquely identify each build for tracking purposes.
 
 **Build for different PostgreSQL versions:**
 
@@ -505,15 +512,22 @@ This creates `postgresql-17-parquet-fdw.deb` in the `Debian/` directory.
 # PostgreSQL 16
 make debian PG_CONFIG=/usr/lib/postgresql/16/bin/pg_config
 
+# PostgreSQL 17
+make debian PG_CONFIG=/usr/lib/postgresql/17/bin/pg_config
+
 # PostgreSQL 18
 make debian PG_CONFIG=/usr/lib/postgresql/18/bin/pg_config
 ```
 
+**Important:** Always use the same `PG_CONFIG` for both `make install` and `make debian`. The build verifies that installed files match the target PostgreSQL version to prevent mixing binaries.
+
 **Install the package:**
 
 ```sh
-sudo dpkg -i Debian/postgresql-17-parquet-fdw.deb
+sudo dpkg -i Debian/postgresql-17-parquet-fdw_0.2+g1a2b3c4_amd64.deb
 ```
+
+The package declares proper dependencies on `postgresql-<version>`, `libarrow`, and `libparquet` to ensure compatible library versions are installed.
 
 **Clean build artifacts:**
 

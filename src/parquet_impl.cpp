@@ -1130,7 +1130,7 @@ extract_rowgroups_list(const char *filename,
                                                                &filter))
                         {
                             match = false;
-                            elog(DEBUG1, "parquet_fdw: skip rowgroup %d", r + 1);
+                            elog(DEBUG1, "parquet_fdw: skip rowgroup %d in %s", r + 1, filename);
                         }
                     }
                     PG_CATCH();
