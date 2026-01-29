@@ -365,7 +365,13 @@ OPTIONS (
 
 ### Per-Table Partition Mappings
 
-When different tables have different date column names, use `tables_partition_map`:
+When different tables have different date column names, use `tables_partition_map` combined with `tables_map` to specify both the file locations and the column mappings for each table.
+
+**Example scenario:**
+- `/data/table1/year=*/month=*/*.parquet` - Parquet files contain an `event_date` column
+- `/data/table2/year=*/month=*/*.parquet` - Parquet files contain a `data_date` column
+
+Both tables are partitioned by year/month directories, but the date column has a different name in each table.
 
 ```sql
 IMPORT FOREIGN SCHEMA "/data"
@@ -373,11 +379,20 @@ FROM SERVER parquet_srv
 INTO public
 OPTIONS (
     hive_partitioning 'true',
-    tables_partition_map 'orders:year={YEAR(order_date)},month={MONTH(order_date)} events:year={YEAR(event_date)},month={MONTH(event_date)}'
+    tables_map 'table1=/data/table1/**/*.parquet table2=/data/table2/**/*.parquet',
+    tables_partition_map 'table1:year={YEAR(event_date)},month={MONTH(event_date)} table2:year={YEAR(data_date)},month={MONTH(data_date)}'
 );
 ```
 
-**Syntax:** Space-separated `tablename:mappings` pairs. Tables not listed use the global `partition_map` if provided, or get virtual columns.
+This creates two foreign tables:
+- `table1` with partition pruning based on `event_date` filters
+- `table2` with partition pruning based on `data_date` filters
+
+**Syntax details:**
+- `tables_map`: Space-separated `tablename=filepattern` pairs
+- `tables_partition_map`: Space-separated `tablename:mappings` pairs (note the colon `:` separator)
+- Within each table's mappings, use commas to separate multiple partition keys
+- Tables not listed in `tables_partition_map` use the global `partition_map` if provided, or get virtual columns (year/month as separate columns)
 
 ### Using Import Functions
 
