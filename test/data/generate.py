@@ -380,3 +380,119 @@ for year, month, data in table2_partitions:
         writer.write_table(table)
 
 print("Generated import_test tables with different date columns in hive/import_test/")
+
+# =============================================================================
+# Edge case test data
+# =============================================================================
+
+# Test 1: URL-encoded partition values
+# Create partition with special characters that need URL encoding
+# Directory: hive/url_encoded/region=North%20America/data.parquet
+url_encoded_schema = pa.schema([
+    pa.field('id', pa.int64()),
+    pa.field('sales', pa.float64()),
+])
+
+# Note: The directory name itself contains the encoded value
+url_encoded_dir = 'hive/url_encoded/region=North%20America'
+os.makedirs(url_encoded_dir, exist_ok=True)
+
+url_encoded_data = pd.DataFrame({
+    'id': [1, 2, 3],
+    'sales': [1000.0, 2000.0, 3000.0],
+})
+url_encoded_table = pa.Table.from_pandas(url_encoded_data, schema=url_encoded_schema, preserve_index=False)
+
+with pq.ParquetWriter(f'{url_encoded_dir}/data.parquet', url_encoded_schema) as writer:
+    writer.write_table(url_encoded_table)
+
+print("Generated URL-encoded partition test data in hive/url_encoded/")
+
+# Test 2: Three-level partition (year/month/day)
+# Directory: hive/three_level/year=2025/month=01/day=15/data.parquet
+three_level_schema = pa.schema([
+    pa.field('id', pa.int64()),
+    pa.field('value', pa.float64()),
+])
+
+three_level_partitions = [
+    ('2025', '01', '15', [{'id': 1, 'value': 100.0}, {'id': 2, 'value': 200.0}]),
+    ('2025', '01', '20', [{'id': 3, 'value': 150.0}, {'id': 4, 'value': 250.0}]),
+    ('2025', '02', '10', [{'id': 5, 'value': 175.0}, {'id': 6, 'value': 225.0}]),
+]
+
+for year, month, day, data in three_level_partitions:
+    dir_path = f'hive/three_level/year={year}/month={month}/day={day}'
+    os.makedirs(dir_path, exist_ok=True)
+
+    df = pd.DataFrame(data)
+    table = pa.Table.from_pandas(df, schema=three_level_schema, preserve_index=False)
+
+    with pq.ParquetWriter(f'{dir_path}/data.parquet', three_level_schema) as writer:
+        writer.write_table(table)
+
+print("Generated three-level partition test data in hive/three_level/")
+
+# Test 3: Column conflict - column exists in both Parquet file AND partition path
+# Directory: hive/conflict/year=2099/data.parquet
+# The Parquet file contains a 'year' column with value 2025 (different from path's 2099)
+conflict_schema = pa.schema([
+    pa.field('id', pa.int64()),
+    pa.field('year', pa.int32()),  # This column is also in the partition path!
+    pa.field('value', pa.float64()),
+])
+
+conflict_dir = 'hive/conflict/year=2099'
+os.makedirs(conflict_dir, exist_ok=True)
+
+# The file's year column has values 2025, 2026, 2027 - different from path year=2099
+conflict_data = pd.DataFrame({
+    'id': [1, 2, 3],
+    'year': [2025, 2026, 2027],  # These values are in the Parquet file
+    'value': [100.0, 200.0, 300.0],
+})
+conflict_table = pa.Table.from_pandas(conflict_data, schema=conflict_schema, preserve_index=False)
+
+with pq.ParquetWriter(f'{conflict_dir}/data.parquet', conflict_schema) as writer:
+    writer.write_table(conflict_table)
+
+print("Generated column conflict test data in hive/conflict/")
+
+# Test 4: Range spanning test - data for testing BETWEEN queries across partition boundaries
+# Directory structure with event_date column that spans multiple months
+# Used to verify that range queries like BETWEEN '2025-01-15' AND '2025-02-15'
+# correctly include both month=01 and month=02 partitions
+range_test_schema = pa.schema([
+    pa.field('id', pa.int64()),
+    pa.field('event_date', pa.date32()),
+    pa.field('value', pa.float64()),
+])
+
+range_test_partitions = [
+    ('2025', '01', [
+        {'id': 1, 'event_date': date(2025, 1, 10), 'value': 100.0},
+        {'id': 2, 'event_date': date(2025, 1, 20), 'value': 200.0},
+        {'id': 3, 'event_date': date(2025, 1, 31), 'value': 300.0},
+    ]),
+    ('2025', '02', [
+        {'id': 4, 'event_date': date(2025, 2, 1), 'value': 400.0},
+        {'id': 5, 'event_date': date(2025, 2, 15), 'value': 500.0},
+        {'id': 6, 'event_date': date(2025, 2, 28), 'value': 600.0},
+    ]),
+    ('2025', '03', [
+        {'id': 7, 'event_date': date(2025, 3, 1), 'value': 700.0},
+        {'id': 8, 'event_date': date(2025, 3, 15), 'value': 800.0},
+    ]),
+]
+
+for year, month, data in range_test_partitions:
+    dir_path = f'hive/range_test/year={year}/month={month}'
+    os.makedirs(dir_path, exist_ok=True)
+
+    df = pd.DataFrame(data)
+    table = pa.Table.from_pandas(df, schema=range_test_schema, preserve_index=False)
+
+    with pq.ParquetWriter(f'{dir_path}/data.parquet', range_test_schema) as writer:
+        writer.write_table(table)
+
+print("Generated range spanning test data in hive/range_test/")

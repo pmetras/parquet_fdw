@@ -273,12 +273,91 @@ SELECT * FROM events WHERE event_date BETWEEN '2024-10-01' AND '2024-11-30';
 | `DAY(column)` | Extract day (1-31) from DATE/TIMESTAMP |
 | `column` | Use column value directly (identity) |
 
+### Multi-Level Partitioning
+
+Hive partitioning supports multiple nesting levels. For example, a three-level partition structure:
+
+```
+/data/events/year=2025/month=01/day=15/data.parquet
+/data/events/year=2025/month=01/day=20/data.parquet
+/data/events/year=2025/month=02/day=10/data.parquet
+```
+
+```sql
+CREATE FOREIGN TABLE events (
+    id      INT,
+    value   NUMERIC,
+    year    INT,    -- from path
+    month   INT,    -- from path
+    day     INT     -- from path
+)
+SERVER parquet_srv
+OPTIONS (
+    filename '/data/events/year=*/month=*/day=*/*.parquet',
+    hive_partitioning 'true'
+);
+
+-- Prunes at each level
+SELECT * FROM events WHERE year = 2025 AND month = 1 AND day = 15;
+```
+
+### Range Queries Spanning Partitions
+
+When using `partition_map`, range queries (BETWEEN, >=, <=) correctly include all partitions that may contain matching data:
+
+```sql
+-- With partition_map 'year={YEAR(event_date)},month={MONTH(event_date)}'
+
+-- This query spans January and February 2025
+-- Both month=01 and month=02 partitions are scanned
+SELECT * FROM events
+WHERE event_date BETWEEN '2025-01-15' AND '2025-02-15';
+```
+
+The FDW translates the date range to partition boundaries and includes all partitions that could contain matching rows.
+
 ### Partition Value Handling
 
 - **Type inference:** Numeric-looking values become integers; others become text.
 - **NULL values:** The special value `__HIVE_DEFAULT_PARTITION__` is converted to SQL NULL.
-- **URL encoding:** Values like `%20` and `%2F` are decoded automatically.
-- **Precedence:** If a column exists in both the path and the Parquet file, the path value takes precedence.
+- **URL encoding:** Percent-encoded values are decoded automatically (e.g., `%20` → space, `%2F` → `/`).
+
+```sql
+-- Directory: region=North%20America/data.parquet
+-- The region column will contain "North America" (decoded)
+SELECT * FROM sales WHERE region = 'North America';
+```
+
+### Column Conflict: File vs Path
+
+When a column name exists in both the partition path and the Parquet file:
+
+- **Column values** are read from the Parquet file (file takes precedence)
+- **Partition pruning** uses the path values
+
+```sql
+-- Directory: year=2099/data.parquet
+-- Parquet file contains: id, year (with values 2025, 2026, 2027), value
+
+CREATE FOREIGN TABLE conflict_example (
+    id      INT,
+    year    INT,    -- exists in BOTH path and file
+    value   NUMERIC
+)
+SERVER parquet_srv
+OPTIONS (
+    filename '/data/year=2099/*.parquet',
+    hive_partitioning 'true'
+);
+
+-- Returns years 2025, 2026, 2027 (from Parquet file)
+SELECT year FROM conflict_example;
+
+-- Returns 0 rows! Partition pruning uses path year=2099, which doesn't match
+SELECT * FROM conflict_example WHERE year = 2025;
+```
+
+**Recommendation:** Avoid column name conflicts between partition paths and Parquet file columns. If conflicts exist, filters on the conflicting column will use path values for pruning, which may unexpectedly exclude files.
 
 ## Execution Strategies
 

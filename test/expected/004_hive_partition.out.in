@@ -227,6 +227,183 @@ EXPLAIN (COSTS OFF) SELECT * FROM table2 WHERE data_date = '2024-05-01';
 -- Clean up imported tables
 DROP FOREIGN TABLE table1;
 DROP FOREIGN TABLE table2;
+-- =============================================================================
+-- Edge Case Tests
+-- =============================================================================
+-- Test 6: URL-encoded partition values
+-- The partition path contains URL-encoded characters: region=North%20America
+-- The FDW should decode %20 to space when returning partition values
+CREATE FOREIGN TABLE hive_url_encoded (
+    id BIGINT,
+    sales FLOAT8,
+    region TEXT    -- virtual column, URL-decoded from path
+)
+SERVER parquet_srv
+OPTIONS (
+    filename '@abs_srcdir@/data/hive/url_encoded/region=North%20America/data.parquet',
+    hive_partitioning 'true'
+);
+-- Verify the region is correctly decoded to "North America"
+SELECT * FROM hive_url_encoded ORDER BY id;
+ id | sales |    region     
+----+-------+---------------
+  1 |  1000 | North America
+  2 |  2000 | North America
+  3 |  3000 | North America
+(3 rows)
+
+-- Verify filter works with decoded value
+SELECT * FROM hive_url_encoded WHERE region = 'North America' ORDER BY id;
+ id | sales |    region     
+----+-------+---------------
+  1 |  1000 | North America
+  2 |  2000 | North America
+  3 |  3000 | North America
+(3 rows)
+
+DROP FOREIGN TABLE hive_url_encoded;
+-- Test 7: Three-level partition (year/month/day)
+-- Tests deep nesting: year=2025/month=01/day=15
+CREATE FOREIGN TABLE hive_three_level (
+    id BIGINT,
+    value FLOAT8,
+    year INT,
+    month INT,
+    day INT
+)
+SERVER parquet_srv
+OPTIONS (
+    filename '@abs_srcdir@/data/hive/three_level/year=2025/month=01/day=15/data.parquet @abs_srcdir@/data/hive/three_level/year=2025/month=01/day=20/data.parquet @abs_srcdir@/data/hive/three_level/year=2025/month=02/day=10/data.parquet',
+    hive_partitioning 'true'
+);
+-- Verify all data with three-level partitions
+SELECT * FROM hive_three_level ORDER BY id;
+ id | value | year | month | day 
+----+-------+------+-------+-----
+  1 |   100 | 2025 |     1 |  15
+  2 |   200 | 2025 |     1 |  15
+  3 |   150 | 2025 |     1 |  20
+  4 |   250 | 2025 |     1 |  20
+  5 |   175 | 2025 |     2 |  10
+  6 |   225 | 2025 |     2 |  10
+(6 rows)
+
+-- Test pruning at each level
+SELECT * FROM hive_three_level WHERE year = 2025 AND month = 1 ORDER BY id;
+ id | value | year | month | day 
+----+-------+------+-------+-----
+  1 |   100 | 2025 |     1 |  15
+  2 |   200 | 2025 |     1 |  15
+  3 |   150 | 2025 |     1 |  20
+  4 |   250 | 2025 |     1 |  20
+(4 rows)
+
+SELECT * FROM hive_three_level WHERE year = 2025 AND month = 1 AND day = 15 ORDER BY id;
+ id | value | year | month | day 
+----+-------+------+-------+-----
+  1 |   100 | 2025 |     1 |  15
+  2 |   200 | 2025 |     1 |  15
+(2 rows)
+
+SELECT * FROM hive_three_level WHERE month = 2 ORDER BY id;
+ id | value | year | month | day 
+----+-------+------+-------+-----
+  5 |   175 | 2025 |     2 |  10
+  6 |   225 | 2025 |     2 |  10
+(2 rows)
+
+DROP FOREIGN TABLE hive_three_level;
+-- Test 8: Column conflict - column exists in both file and partition path
+-- The partition path has year=2099, but the Parquet file contains a 'year' column
+-- with different values (2025, 2026, 2027). File data takes precedence for column values.
+-- NOTE: Partition pruning uses PATH values, so filtering on year will use 2099 for pruning.
+CREATE FOREIGN TABLE hive_conflict (
+    id BIGINT,
+    year INT,     -- This column is in BOTH the Parquet file AND partition path
+    value FLOAT8
+)
+SERVER parquet_srv
+OPTIONS (
+    filename '@abs_srcdir@/data/hive/conflict/year=2099/data.parquet',
+    hive_partitioning 'true'
+);
+-- Year column values come from the Parquet file (2025, 2026, 2027), NOT from path (2099)
+SELECT * FROM hive_conflict ORDER BY id;
+ id | year | value 
+----+------+-------
+  1 | 2025 |   100
+  2 | 2026 |   200
+  3 | 2027 |   300
+(3 rows)
+
+-- Filter on year=2025 returns 0 rows because partition pruning uses path year=2099
+-- This is expected: pruning happens before file reading
+SELECT * FROM hive_conflict WHERE year = 2025 ORDER BY id;
+ id | year | value 
+----+------+-------
+(0 rows)
+
+DROP FOREIGN TABLE hive_conflict;
+-- Test 9: Range spanning queries with partition_map
+-- Tests that BETWEEN queries spanning partition boundaries include all needed partitions
+CREATE FOREIGN TABLE hive_range_test (
+    id BIGINT,
+    event_date DATE,
+    value FLOAT8,
+    year INT,
+    month INT
+)
+SERVER parquet_srv
+OPTIONS (
+    filename '@abs_srcdir@/data/hive/range_test/year=2025/month=01/data.parquet @abs_srcdir@/data/hive/range_test/year=2025/month=02/data.parquet @abs_srcdir@/data/hive/range_test/year=2025/month=03/data.parquet',
+    hive_partitioning 'true',
+    partition_map 'year={YEAR(event_date)},month={MONTH(event_date)}'
+);
+-- Verify all data
+SELECT * FROM hive_range_test ORDER BY id;
+ id | event_date | value | year | month 
+----+------------+-------+------+-------
+  1 | 2025-01-10 |   100 | 2025 |     1
+  2 | 2025-01-20 |   200 | 2025 |     1
+  3 | 2025-01-31 |   300 | 2025 |     1
+  4 | 2025-02-01 |   400 | 2025 |     2
+  5 | 2025-02-15 |   500 | 2025 |     2
+  6 | 2025-02-28 |   600 | 2025 |     2
+  7 | 2025-03-01 |   700 | 2025 |     3
+  8 | 2025-03-15 |   800 | 2025 |     3
+(8 rows)
+
+-- Range query spanning January and February (should include both partitions)
+SELECT * FROM hive_range_test WHERE event_date BETWEEN '2025-01-15' AND '2025-02-15' ORDER BY id;
+ id | event_date | value | year | month 
+----+------------+-------+------+-------
+  2 | 2025-01-20 |   200 | 2025 |     1
+  3 | 2025-01-31 |   300 | 2025 |     1
+  4 | 2025-02-01 |   400 | 2025 |     2
+  5 | 2025-02-15 |   500 | 2025 |     2
+(4 rows)
+
+-- EXPLAIN should show both month=01 and month=02 files are scanned
+EXPLAIN (COSTS OFF) SELECT * FROM hive_range_test WHERE event_date BETWEEN '2025-01-15' AND '2025-02-15';
+                                      QUERY PLAN                                       
+---------------------------------------------------------------------------------------
+ Foreign Scan on hive_range_test
+   Filter: ((event_date >= '2025-01-15'::date) AND (event_date <= '2025-02-15'::date))
+   Reader: Multifile
+   Row groups: 
+     data.parquet: 1
+     data.parquet: 1
+(6 rows)
+
+-- Single month query (should prune to one partition)
+SELECT * FROM hive_range_test WHERE event_date >= '2025-03-01' ORDER BY id;
+ id | event_date | value | year | month 
+----+------------+-------+------+-------
+  7 | 2025-03-01 |   700 | 2025 |     3
+  8 | 2025-03-15 |   800 | 2025 |     3
+(2 rows)
+
+DROP FOREIGN TABLE hive_range_test;
 -- Clean up
 DROP FOREIGN TABLE hive_basic;
 DROP FOREIGN TABLE hive_region;
