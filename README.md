@@ -577,8 +577,9 @@ The FDW uses multiple techniques to skip row groups that cannot contain matching
 
 **Min/Max Statistics Pruning:**
 - Parquet stores min/max values per column per row group
-- Works for comparison operators: `=`, `<`, `<=`, `>`, `>=`, `IN`
+- Works for comparison operators: `=`, `<`, `<=`, `>`, `>=`, `!=`, `IN`
 - Supported types: integers, floats, booleans, strings, dates, timestamps
+- Note: `!=` (not equal) pruning only works when min == max, i.e., all values in the row group are identical
 
 **IN Operator Pruning:**
 - For `IN (value1, value2, ...)` filters, row groups are pruned if none of the values fall within the min/max range
@@ -601,6 +602,14 @@ The FDW uses multiple techniques to skip row groups that cannot contain matching
 
 **Example:** For a query like `WHERE event_name = 'click'`, min/max statistics may not help if each row group contains events from 'a' to 'z'. However, if the Parquet file has bloom filters on `event_name`, the FDW can quickly exclude row groups that definitely don't contain 'click'.
 
+**Dictionary Filtering:**
+- For equality filters (`=`), dictionary-encoded columns can be pruned by checking if the filter value exists in the column's dictionary
+- Useful when bloom filters are not available but the column uses dictionary encoding
+- Supported types: INT32, INT64, STRING
+- If a value is not in the dictionary, the entire row group can be skipped
+
+**Example:** A column with status codes ('pending', 'approved', 'rejected') stored with dictionary encoding can be efficiently filtered without bloom filters. A query `WHERE status = 'unknown'` will skip row groups where 'unknown' is not in the dictionary.
+
 To enable bloom filters when writing Parquet files (PyArrow example):
 ```python
 import pyarrow.parquet as pq
@@ -621,8 +630,14 @@ Enable debug logging to see row group pruning in action:
 SET client_min_messages = DEBUG1;
 SELECT * FROM events WHERE event_name = 'click';
 -- DEBUG: parquet_fdw: skip rowgroup 1 in events.parquet (stats)
+-- DEBUG: parquet_fdw: skip rowgroup 2 in events.parquet (dict)
 -- DEBUG: parquet_fdw: skip rowgroup 3 in events.parquet (bloom)
 ```
+
+The pruning methods shown in parentheses indicate how the row group was pruned:
+- `stats`: Min/max statistics from row group metadata
+- `bloom`: Bloom filter check
+- `dict`: Dictionary encoding check
 
 ### When to Run ANALYZE
 
@@ -637,6 +652,29 @@ ANALYZE my_parquet_table;
 ```
 
 For large tables with complex queries, running `ANALYZE` periodically can improve query performance.
+
+### Aggregate Pushdown Detection
+
+The FDW detects when simple aggregate queries can potentially be answered from Parquet metadata alone, and logs this information at DEBUG1 level:
+
+**COUNT(*):**
+When a query is `SELECT COUNT(*) FROM table` without filters, the FDW detects that the total row count could be computed from file metadata without reading any data.
+
+**MIN/MAX:**
+When a query computes MIN or MAX on a single column, the FDW detects that these values could be computed from row group statistics.
+
+```sql
+SET client_min_messages = DEBUG1;
+
+SELECT COUNT(*) FROM events;
+-- DEBUG: parquet_fdw: aggregate pushdown possible: COUNT(*)
+
+SELECT MIN(id), MAX(id) FROM events;
+-- DEBUG: parquet_fdw: aggregate pushdown possible: MIN on column 1
+-- DEBUG: parquet_fdw: aggregate pushdown possible: MAX on column 1
+```
+
+**Note:** Currently this is detection only - the FDW logs when pushdown is possible but still executes the full scan. Full pushdown execution (returning results directly from metadata) is a potential future enhancement.
 
 ## Configuration
 
