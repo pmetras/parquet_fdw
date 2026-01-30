@@ -262,6 +262,46 @@ DEBUG:  parquet_fdw: adding globbed filename @abs_srcdir@/data/simple/example1.p
    6 | {16,17,18} | tres  | 2018-01-06 00:00:00.00001 | 2018-01-06 | f   |     2
 (6 rows)
 
+-- MIN/MAX aggregate pushdown detection (no WHERE clause)
+SELECT MIN(one) FROM example1;  -- should detect pushdown candidate
+DEBUG:  parquet_fdw: adding globbed filename @abs_srcdir@/data/simple/example1.parquet to list of files
+DEBUG:  parquet_fdw: adding globbed filename @abs_srcdir@/data/simple/example1.parquet to list of files
+DEBUG:  parquet_fdw: MIN(column 1) pushdown candidate - value available from metadata
+ min 
+-----
+   1
+(1 row)
+
+SELECT MAX(one) FROM example1;  -- should detect pushdown candidate
+DEBUG:  parquet_fdw: adding globbed filename @abs_srcdir@/data/simple/example1.parquet to list of files
+DEBUG:  parquet_fdw: adding globbed filename @abs_srcdir@/data/simple/example1.parquet to list of files
+DEBUG:  parquet_fdw: adding globbed filename @abs_srcdir@/data/simple/example1.parquet to list of files
+DEBUG:  parquet_fdw: MAX(column 1) pushdown candidate - value available from metadata
+ max 
+-----
+   6
+(1 row)
+
+SELECT MIN(five) FROM example1;  -- date column
+DEBUG:  parquet_fdw: adding globbed filename @abs_srcdir@/data/simple/example1.parquet to list of files
+DEBUG:  parquet_fdw: adding globbed filename @abs_srcdir@/data/simple/example1.parquet to list of files
+DEBUG:  parquet_fdw: adding globbed filename @abs_srcdir@/data/simple/example1.parquet to list of files
+DEBUG:  parquet_fdw: MIN(column 5) pushdown candidate - value available from metadata
+    min     
+------------
+ 2018-01-01
+(1 row)
+
+SELECT MAX(five) FROM example1;  -- date column
+DEBUG:  parquet_fdw: adding globbed filename @abs_srcdir@/data/simple/example1.parquet to list of files
+DEBUG:  parquet_fdw: adding globbed filename @abs_srcdir@/data/simple/example1.parquet to list of files
+DEBUG:  parquet_fdw: adding globbed filename @abs_srcdir@/data/simple/example1.parquet to list of files
+DEBUG:  parquet_fdw: MAX(column 5) pushdown candidate - value available from metadata
+    max     
+------------
+ 2018-01-06
+(1 row)
+
 -- prepared statements
 prepare prep(date) as select * from example1 where five < $1;
 execute prep('2018-01-03');

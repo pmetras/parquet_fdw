@@ -8,6 +8,7 @@ namespace fs = std::filesystem;
 #include <sys/stat.h>
 #include <math.h>
 #include <list>
+#include <map>
 #include <set>
 #include <glob.h>
 
@@ -137,6 +138,21 @@ struct RowGroupFilter
 };
 
 /*
+ * Per-column statistics aggregated across all row groups.
+ * Used for MIN/MAX aggregate pushdown.
+ */
+struct ColumnAggregateStats
+{
+    AttrNumber  attnum;
+    bool        has_min;        /* true if min_value is valid */
+    bool        has_max;        /* true if max_value is valid */
+    std::string min_value;      /* encoded min across all row groups */
+    std::string max_value;      /* encoded max across all row groups */
+    Oid         pg_type;        /* PostgreSQL type OID */
+    int         arrow_type_id;  /* Arrow type ID for conversion */
+};
+
+/*
  * Plain C struct for fdw_state
  */
 struct ParquetFdwPlanState
@@ -158,6 +174,9 @@ struct ParquetFdwPlanState
     char       *partition_map;              /* Partition map string (column-to-partition mapping) */
     std::vector<HivePartitionMapping> *partition_mappings;  /* Parsed partition mappings */
     std::vector<std::vector<HivePartitionValue>> *file_partition_values;  /* Per-file partition values */
+
+    /* Aggregate pushdown: column statistics across all row groups */
+    std::map<AttrNumber, ColumnAggregateStats> *column_stats;
 };
 
 /*
@@ -1959,6 +1978,133 @@ extract_rowgroups_list(const char *filename,
     return rowgroups;
 }
 
+/*
+ * collect_column_stats
+ *      Collect min/max statistics for each column across all row groups in a file.
+ *      Updates the column_stats map with global min/max values.
+ */
+static void
+collect_column_stats(const char *filename,
+                     TupleDesc tupleDesc,
+                     List *rowgroups,
+                     std::map<AttrNumber, ColumnAggregateStats> &column_stats) noexcept
+{
+    std::string error;
+
+    if (rowgroups == NIL)
+        return;
+
+    try
+    {
+        std::unique_ptr<parquet::arrow::FileReader> reader;
+        auto result = parquet::arrow::FileReader::Make(
+                arrow::default_memory_pool(),
+                parquet::ParquetFileReader::OpenFile(filename, false));
+
+        if (!result.ok())
+            throw Error("failed to open Parquet file: %s ('%s')",
+                        result.status().message().c_str(), filename);
+        reader = std::move(result).ValueUnsafe();
+
+        auto meta = reader->parquet_reader()->metadata();
+        parquet::ArrowReaderProperties props;
+        parquet::arrow::SchemaManifest manifest;
+
+        arrow::Status status = parquet::arrow::SchemaManifest::Make(
+            meta->schema(), nullptr, props, &manifest);
+        if (!status.ok())
+            throw Error("error creating arrow schema ('%s')", filename);
+
+        /* Iterate over each column in the tuple descriptor */
+        for (int attnum = 1; attnum <= tupleDesc->natts; attnum++)
+        {
+            Form_pg_attribute attr = TupleDescAttr(tupleDesc, attnum - 1);
+            char pg_colname[NAMEDATALEN];
+            tolowercase(NameStr(attr->attname), pg_colname);
+
+            /* Find matching schema field */
+            for (auto &schema_field : manifest.schema_fields)
+            {
+                auto &field = schema_field.field;
+
+                /* Skip complex objects */
+                if (schema_field.column_index == -1 &&
+                    field->type()->id() != arrow::Type::MAP)
+                    continue;
+
+                char arrow_colname[NAMEDATALEN];
+                if (field->name().length() >= NAMEDATALEN)
+                    continue;
+                tolowercase(field->name().c_str(), arrow_colname);
+
+                if (strcmp(pg_colname, arrow_colname) != 0)
+                    continue;
+
+                /* Skip MAPs and complex types for now */
+                if (field->type()->id() == arrow::Type::MAP ||
+                    !arrow_type_supports_statistics(field->type().get()))
+                    continue;
+
+                int column_index = schema_field.column_index;
+
+                /* Initialize stats for this column if not already done */
+                if (column_stats.find(attnum) == column_stats.end())
+                {
+                    ColumnAggregateStats stats;
+                    stats.attnum = attnum;
+                    stats.has_min = false;
+                    stats.has_max = false;
+                    stats.pg_type = attr->atttypid;
+                    stats.arrow_type_id = field->type()->id();
+                    column_stats[attnum] = stats;
+                }
+
+                /* Iterate over matched row groups to update min/max */
+                ListCell *lc;
+                foreach(lc, rowgroups)
+                {
+                    int rg_idx = lfirst_int(lc);
+                    auto rowgroup = meta->RowGroup(rg_idx);
+                    auto column = rowgroup->ColumnChunk(column_index);
+                    auto stats = column->statistics();
+
+                    if (!stats || !stats->HasMinMax())
+                        continue;
+
+                    std::string rg_min = stats->EncodeMin();
+                    std::string rg_max = stats->EncodeMax();
+
+                    ColumnAggregateStats &col_stats = column_stats[attnum];
+
+                    /* Update global min */
+                    if (!col_stats.has_min || rg_min < col_stats.min_value)
+                    {
+                        col_stats.min_value = rg_min;
+                        col_stats.has_min = true;
+                    }
+
+                    /* Update global max */
+                    if (!col_stats.has_max || rg_max > col_stats.max_value)
+                    {
+                        col_stats.max_value = rg_max;
+                        col_stats.has_max = true;
+                    }
+                }
+                break;  /* Found the column, move to next attribute */
+            }
+        }
+    }
+    catch (const std::exception &e)
+    {
+        error = e.what();
+    }
+
+    if (!error.empty())
+    {
+        elog(DEBUG1, "parquet_fdw: failed to collect column stats: %s", error.c_str());
+    }
+}
+
 struct FieldInfo
 {
     char    name[NAMEDATALEN];
@@ -2399,6 +2545,7 @@ parquetGetForeignRelSize(PlannerInfo *root,
     uint64          total_rows = 0;
 
     fdw_private = (ParquetFdwPlanState *) palloc0(sizeof(ParquetFdwPlanState));
+    fdw_private->column_stats = new std::map<AttrNumber, ColumnAggregateStats>();
     get_table_options(foreigntableid, fdw_private);
 
     /* Analyze query clauses and extract ones that can be of interest to us*/
@@ -2443,6 +2590,10 @@ parquetGetForeignRelSize(PlannerInfo *root,
         {
             fdw_private->rowgroups = lappend(fdw_private->rowgroups, rowgroups);
             fdw_private->filenames = lappend(fdw_private->filenames, lfirst(lc));
+
+            /* Collect column min/max statistics for aggregate pushdown */
+            collect_column_stats(filename, tupleDesc, rowgroups,
+                                 *fdw_private->column_stats);
         }
     }
 #if PG_VERSION_NUM < 120000
@@ -4210,8 +4361,10 @@ import_parquet_with_attrs(PG_FUNCTION_ARGS)
  * parquetGetForeignUpperPaths
  *      Add paths for post-scan operations like aggregation.
  *
- * Currently supports COUNT(*) pushdown when there's no WHERE clause,
- * using the row count from Parquet metadata instead of scanning.
+ * Supports pushdown for simple aggregates without WHERE clause:
+ * - COUNT(*): returns row count from metadata
+ * - MIN(column): returns minimum from row group statistics
+ * - MAX(column): returns maximum from row group statistics
  */
 extern "C" void
 parquetGetForeignUpperPaths(PlannerInfo *root,
@@ -4235,26 +4388,16 @@ parquetGetForeignUpperPaths(PlannerInfo *root,
         return;
 
     /*
-     * For COUNT(*) pushdown to be accurate, we need:
-     * 1. No WHERE clause (all rows are counted)
-     * 2. matched_rows equals total table rows (no filtering happened)
-     *
+     * For aggregate pushdown to be accurate, we need no WHERE clause.
      * If there's any WHERE clause, individual rows need to be scanned
      * because row group statistics only prune at the row group level.
      */
     if (input_rel->baserestrictinfo != NIL)
     {
-        elog(DEBUG2, "parquet_fdw: COUNT(*) pushdown disabled - WHERE clause present");
+        elog(DEBUG2, "parquet_fdw: aggregate pushdown disabled - WHERE clause present");
         return;
     }
 
-    /*
-     * Check if this is a simple COUNT(*) with no grouping.
-     * We look for queries like: SELECT COUNT(*) FROM table
-     *
-     * The grouped_rel (output_rel) should have no grouping columns,
-     * and the parse tree should have a single COUNT(*) aggregate.
-     */
 #if PG_VERSION_NUM >= 110000
     Query *parse = root->parse;
 
@@ -4265,70 +4408,109 @@ parquetGetForeignUpperPaths(PlannerInfo *root,
     /* No GROUP BY clause */
     if (parse->groupClause != NIL)
     {
-        elog(DEBUG2, "parquet_fdw: COUNT(*) pushdown disabled - GROUP BY present");
+        elog(DEBUG2, "parquet_fdw: aggregate pushdown disabled - GROUP BY present");
         return;
     }
 
     /* No HAVING clause */
     if (parse->havingQual != NULL)
     {
-        elog(DEBUG2, "parquet_fdw: COUNT(*) pushdown disabled - HAVING present");
+        elog(DEBUG2, "parquet_fdw: aggregate pushdown disabled - HAVING present");
         return;
     }
 
-    /* Check if the target list has a single COUNT(*) aggregate */
+    /* Check if the target list has a single aggregate */
     if (list_length(parse->targetList) != 1)
     {
-        elog(DEBUG2, "parquet_fdw: COUNT(*) pushdown disabled - multiple target columns");
+        elog(DEBUG2, "parquet_fdw: aggregate pushdown disabled - multiple target columns");
         return;
     }
 
     TargetEntry *tle = (TargetEntry *) linitial(parse->targetList);
     if (!IsA(tle->expr, Aggref))
     {
-        elog(DEBUG2, "parquet_fdw: COUNT(*) pushdown disabled - not an aggregate");
+        elog(DEBUG2, "parquet_fdw: aggregate pushdown disabled - not an aggregate");
         return;
     }
 
     Aggref *aggref = (Aggref *) tle->expr;
-
-    /* Check if it's COUNT(*) - no arguments and aggfnoid is count */
-    if (aggref->args != NIL)
-    {
-        elog(DEBUG2, "parquet_fdw: COUNT(*) pushdown disabled - aggregate has arguments");
-        return;
-    }
-
-    /* Verify it's the count aggregate */
     const char *aggname = get_func_name(aggref->aggfnoid);
-    if (aggname == NULL || strcmp(aggname, "count") != 0)
+
+    if (aggname == NULL)
+        return;
+
+    /*
+     * Handle COUNT(*)
+     */
+    if (strcmp(aggname, "count") == 0 && aggref->args == NIL)
     {
-        elog(DEBUG2, "parquet_fdw: COUNT(*) pushdown disabled - not COUNT aggregate");
+        uint64 count = fdw_private->matched_rows;
+
+        elog(DEBUG1, "parquet_fdw: COUNT(*) pushdown candidate - %lu rows from metadata",
+             (unsigned long) count);
         return;
     }
 
     /*
-     * We can push down COUNT(*)!
-     * The count is simply the matched_rows from metadata.
-     *
-     * For a full pushdown implementation, we would need to:
-     * 1. Create a ForeignPath for the grouped relation
-     * 2. Handle it specially in BeginForeignScan/IterateForeignScan
-     * 3. Return a single tuple with the count value
-     *
-     * For now, we rely on the existing optimization where:
-     * - Row count is already computed from Parquet metadata during planning
-     * - Column projection means only one column is read for COUNT(*)
-     * - Cost estimation uses the accurate row count from metadata
-     *
-     * Future enhancement: Create a fully pushed-down aggregate path that
-     * returns the count directly without any file I/O.
+     * Handle MIN(column) and MAX(column)
      */
-    uint64 count = fdw_private->matched_rows;
+    if ((strcmp(aggname, "min") == 0 || strcmp(aggname, "max") == 0) &&
+        list_length(aggref->args) == 1)
+    {
+        /* Get the aggregate argument */
+        TargetEntry *arg_tle = (TargetEntry *) linitial(aggref->args);
+        Expr *arg_expr = arg_tle->expr;
 
-    elog(DEBUG1, "parquet_fdw: COUNT(*) candidate detected - %lu rows from metadata "
-         "(full pushdown not yet implemented, but cost estimate uses metadata count)",
-         (unsigned long) count);
+        /* Must be a simple column reference */
+        if (!IsA(arg_expr, Var))
+        {
+            elog(DEBUG2, "parquet_fdw: %s pushdown disabled - argument is not a column",
+                 aggname);
+            return;
+        }
+
+        Var *var = (Var *) arg_expr;
+
+        /* Check if we have statistics for this column */
+        if (!fdw_private->column_stats ||
+            fdw_private->column_stats->find(var->varattno) == fdw_private->column_stats->end())
+        {
+            elog(DEBUG2, "parquet_fdw: %s pushdown disabled - no statistics for column %d",
+                 aggname, var->varattno);
+            return;
+        }
+
+        ColumnAggregateStats &col_stats = (*fdw_private->column_stats)[var->varattno];
+
+        if (strcmp(aggname, "min") == 0)
+        {
+            if (!col_stats.has_min)
+            {
+                elog(DEBUG2, "parquet_fdw: MIN pushdown disabled - no min value available");
+                return;
+            }
+
+            elog(DEBUG1, "parquet_fdw: MIN(column %d) pushdown candidate - "
+                 "value available from metadata",
+                 var->varattno);
+        }
+        else /* max */
+        {
+            if (!col_stats.has_max)
+            {
+                elog(DEBUG2, "parquet_fdw: MAX pushdown disabled - no max value available");
+                return;
+            }
+
+            elog(DEBUG1, "parquet_fdw: MAX(column %d) pushdown candidate - "
+                 "value available from metadata",
+                 var->varattno);
+        }
+
+        return;
+    }
+
+    elog(DEBUG2, "parquet_fdw: aggregate '%s' not supported for pushdown", aggname);
 
 #endif /* PG_VERSION_NUM >= 110000 */
 }
