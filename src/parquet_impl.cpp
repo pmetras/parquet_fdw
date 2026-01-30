@@ -118,9 +118,13 @@ static List * lappend_globbed_filenames(List *filenames, const char *filename);
 struct RowGroupFilter
 {
     AttrNumber  attnum;
-    bool        is_key; /* for maps */
-    Const      *value;
+    bool        is_key;         /* for maps */
+    Const      *value;          /* single value for simple comparisons */
+    List       *values;         /* list of Const* for IN operator (ScalarArrayOpExpr) */
     int         strategy;
+    bool        is_array;       /* true if this is an IN operator filter */
+    bool        is_null_test;   /* true if this is an IS NULL / IS NOT NULL filter */
+    NullTestType null_test_type;/* IS_NULL or IS_NOT_NULL */
 };
 
 /*
@@ -608,6 +612,140 @@ extract_rowgroup_filters(List *scan_clauses,
             strategy = BTEqualStrategyNumber;
             c = (Const *) makeBoolConst(false, false);
         }
+        else if (IsA(clause, ScalarArrayOpExpr))
+        {
+            /*
+             * Handle IN operator: col IN (val1, val2, ...) which is represented
+             * as ScalarArrayOpExpr with useOr = true.
+             */
+            ScalarArrayOpExpr *saop = (ScalarArrayOpExpr *) clause;
+
+            /* Only handle IN (useOr = true), not ALL */
+            if (!saop->useOr)
+                continue;
+
+            /* Need exactly 2 args: variable and array constant */
+            if (list_length(saop->args) != 2)
+                continue;
+
+            Expr *arg1 = (Expr *) linitial(saop->args);
+            Expr *arg2 = (Expr *) lsecond(saop->args);
+
+            /* First arg must be Var, second must be Const (array) */
+            if (!IsA(arg1, Var) || !IsA(arg2, Const))
+                continue;
+
+            v = (Var *) arg1;
+            Const *arr_const = (Const *) arg2;
+
+            /* Skip NULL arrays */
+            if (arr_const->constisnull)
+                continue;
+
+            /* Verify it's an equality operator */
+            if ((strategy = get_strategy(v->vartype, saop->opno, BTREE_AM_OID)) == 0)
+                continue;
+            if (strategy != BTEqualStrategyNumber)
+                continue;
+
+            /* Extract array elements into a list of Const nodes */
+            ArrayType  *arr = DatumGetArrayTypeP(arr_const->constvalue);
+            Oid         elem_type = ARR_ELEMTYPE(arr);
+            int16       elem_len;
+            bool        elem_byval;
+            char        elem_align;
+            Datum      *elem_values;
+            bool       *elem_nulls;
+            int         num_elems;
+
+            get_typlenbyvalalign(elem_type, &elem_len, &elem_byval, &elem_align);
+            deconstruct_array(arr, elem_type, elem_len, elem_byval, elem_align,
+                              &elem_values, &elem_nulls, &num_elems);
+
+            /* Skip empty arrays */
+            if (num_elems == 0)
+                continue;
+
+            /* Build list of Const nodes from array elements */
+            List *values_list = NIL;
+            for (int i = 0; i < num_elems; i++)
+            {
+                /* Skip NULL elements */
+                if (elem_nulls[i])
+                    continue;
+
+                Const *elem_const = makeConst(elem_type,
+                                              -1,  /* typmod */
+                                              arr_const->constcollid,
+                                              elem_len,
+                                              elem_values[i],
+                                              false,  /* not null */
+                                              elem_byval);
+                values_list = lappend(values_list, elem_const);
+            }
+
+            /* Skip if all elements were NULL */
+            if (values_list == NIL)
+                continue;
+
+            RowGroupFilter f
+            {
+                .attnum = v->varattno,
+                .is_key = false,
+                .value = NULL,
+                .values = values_list,
+                .strategy = BTEqualStrategyNumber,
+                .is_array = true,
+            };
+
+            bool error = false;
+            try {
+                filters.push_back(f);
+            } catch (std::exception &e) {
+                error = true;
+            }
+            if (error)
+                elog(ERROR, "extracting row filters failed");
+
+            continue;  /* Already added, skip the common path below */
+        }
+        else if (IsA(clause, NullTest))
+        {
+            /*
+             * Handle IS NULL and IS NOT NULL filters.
+             * Uses null_count statistics for pruning.
+             */
+            NullTest *nt = (NullTest *) clause;
+
+            /* Only handle simple Var expressions */
+            if (!IsA(nt->arg, Var))
+                continue;
+
+            v = (Var *) nt->arg;
+
+            RowGroupFilter f
+            {
+                .attnum = v->varattno,
+                .is_key = false,
+                .value = NULL,
+                .values = NIL,
+                .strategy = 0,
+                .is_array = false,
+                .is_null_test = true,
+                .null_test_type = nt->nulltesttype,
+            };
+
+            bool error = false;
+            try {
+                filters.push_back(f);
+            } catch (std::exception &e) {
+                error = true;
+            }
+            if (error)
+                elog(ERROR, "extracting row filters failed");
+
+            continue;  /* Already added, skip the common path below */
+        }
         else
             continue;
 
@@ -616,7 +754,10 @@ extract_rowgroup_filters(List *scan_clauses,
             .attnum = v->varattno,
             .is_key = is_key,
             .value = c,
+            .values = NIL,
             .strategy = strategy,
+            .is_array = false,
+            .is_null_test = false,
         };
 
         /* potentially inserting elements may throw exceptions */
@@ -751,12 +892,73 @@ row_group_matches_filter(parquet::Statistics *stats,
 {
     FmgrInfo finfo;
     Datum    val;
-    int      collid = filter->value->constcollid;
+    int      collid;
     int      strategy = filter->strategy;
 
     /* Check if this type supports statistics filtering */
     if (!arrow_type_supports_statistics(arrow_type))
         return true;  /* Can't filter, don't exclude any row groups */
+
+    /*
+     * Handle IN operator (ScalarArrayOpExpr) separately.
+     * For IN, keep the row group if ANY value could match.
+     */
+    if (filter->is_array && filter->values != NIL)
+    {
+        ListCell   *lc;
+        Const      *first_const = (Const *) linitial(filter->values);
+        std::string min_str = stats->EncodeMin();
+        std::string max_str = stats->EncodeMax();
+        Datum       lower, upper;
+
+        lower = bytes_to_postgres_type(min_str.c_str(), min_str.length(), arrow_type);
+        upper = bytes_to_postgres_type(max_str.c_str(), max_str.length(), arrow_type);
+
+        find_cmp_func(&finfo, first_const->consttype, to_postgres_type(arrow_type));
+        collid = first_const->constcollid;
+
+        /* Check if ANY value in the list falls within [min, max] */
+        foreach(lc, filter->values)
+        {
+            Const  *c = (Const *) lfirst(lc);
+            Datum   v = c->constvalue;
+
+            int l = FunctionCall2Coll(&finfo, collid, v, lower);
+            int u = FunctionCall2Coll(&finfo, collid, v, upper);
+
+            /* If value is within [min, max], this row group might match */
+            if (l >= 0 && u <= 0)
+                return true;
+        }
+        /* No value could possibly match this row group */
+        return false;
+    }
+
+    /*
+     * Handle IS NULL / IS NOT NULL filters using null_count statistics.
+     */
+    if (filter->is_null_test)
+    {
+        int64_t null_count = stats->null_count();
+        int64_t num_values = stats->num_values();
+
+        if (filter->null_test_type == IS_NULL)
+        {
+            /* IS NULL: skip row group if there are no NULLs */
+            if (null_count == 0)
+                return false;
+        }
+        else /* IS_NOT_NULL */
+        {
+            /* IS NOT NULL: skip row group if all values are NULL */
+            if (null_count == num_values && num_values > 0)
+                return false;
+        }
+        return true;
+    }
+
+    /* Standard single-value filter handling */
+    collid = filter->value->constcollid;
 
     if (arrow_type->id() == arrow::Type::MAP && filter->is_key)
     {
@@ -858,6 +1060,66 @@ row_group_matches_filter(parquet::Statistics *stats,
 }
 
 /*
+ * bloom_filter_hash_value
+ *      Compute bloom filter hash for a single value.
+ *      Returns true if hash was computed successfully, false otherwise.
+ */
+static bool
+bloom_filter_hash_value(parquet::BloomFilter *bloom_filter,
+                        const arrow::DataType *arrow_type,
+                        Datum val,
+                        uint64_t *hash_out)
+{
+    switch (arrow_type->id())
+    {
+        case arrow::Type::INT8:
+        case arrow::Type::INT16:
+        case arrow::Type::INT32:
+            {
+                int32_t v = DatumGetInt32(val);
+                *hash_out = bloom_filter->Hash(v);
+                return true;
+            }
+
+        case arrow::Type::INT64:
+            {
+                int64_t v = DatumGetInt64(val);
+                *hash_out = bloom_filter->Hash(v);
+                return true;
+            }
+
+        case arrow::Type::FLOAT:
+            {
+                float v = DatumGetFloat4(val);
+                *hash_out = bloom_filter->Hash(v);
+                return true;
+            }
+
+        case arrow::Type::DOUBLE:
+            {
+                double v = DatumGetFloat8(val);
+                *hash_out = bloom_filter->Hash(v);
+                return true;
+            }
+
+        case arrow::Type::STRING:
+        case arrow::Type::BINARY:
+            {
+                text *t = DatumGetTextPP(val);
+                parquet::ByteArray ba;
+                ba.ptr = (const uint8_t *) VARDATA_ANY(t);
+                ba.len = VARSIZE_ANY_EXHDR(t);
+                *hash_out = bloom_filter->Hash(&ba);
+                return true;
+            }
+
+        default:
+            /* Type not supported for bloom filter */
+            return false;
+    }
+}
+
+/*
  * row_group_matches_bloom_filter
  *      Check if the value could be present in the row group using bloom filter.
  *      Only works for equality filters (BTEqualStrategyNumber).
@@ -869,63 +1131,43 @@ row_group_matches_bloom_filter(parquet::BloomFilter *bloom_filter,
                                RowGroupFilter *filter)
 {
     uint64_t hash;
-    Datum val = filter->value->constvalue;
 
     /* Only equality filters can use bloom filters */
     if (filter->strategy != BTEqualStrategyNumber)
         return true;
 
+    /*
+     * Handle IN operator (ScalarArrayOpExpr).
+     * Return true if ANY value in the list might be in the bloom filter.
+     */
+    if (filter->is_array && filter->values != NIL)
+    {
+        ListCell *lc;
+
+        foreach(lc, filter->values)
+        {
+            Const *c = (Const *) lfirst(lc);
+            if (c->constisnull)
+                continue;
+
+            if (!bloom_filter_hash_value(bloom_filter, arrow_type, c->constvalue, &hash))
+                return true;  /* Type not supported, can't exclude */
+
+            if (bloom_filter->FindHash(hash))
+                return true;  /* This value might be present */
+        }
+        /* None of the values could be present */
+        return false;
+    }
+
+    /* Standard single-value filter handling */
+
     /* NULL values can't be checked against bloom filter */
     if (filter->value->constisnull)
         return true;
 
-    switch (arrow_type->id())
-    {
-        case arrow::Type::INT8:
-        case arrow::Type::INT16:
-        case arrow::Type::INT32:
-            {
-                int32_t v = DatumGetInt32(val);
-                hash = bloom_filter->Hash(v);
-                break;
-            }
-
-        case arrow::Type::INT64:
-            {
-                int64_t v = DatumGetInt64(val);
-                hash = bloom_filter->Hash(v);
-                break;
-            }
-
-        case arrow::Type::FLOAT:
-            {
-                float v = DatumGetFloat4(val);
-                hash = bloom_filter->Hash(v);
-                break;
-            }
-
-        case arrow::Type::DOUBLE:
-            {
-                double v = DatumGetFloat8(val);
-                hash = bloom_filter->Hash(v);
-                break;
-            }
-
-        case arrow::Type::STRING:
-        case arrow::Type::BINARY:
-            {
-                text *t = DatumGetTextPP(val);
-                parquet::ByteArray ba;
-                ba.ptr = (const uint8_t *) VARDATA_ANY(t);
-                ba.len = VARSIZE_ANY_EXHDR(t);
-                hash = bloom_filter->Hash(&ba);
-                break;
-            }
-
-        default:
-            /* Type not supported for bloom filter, assume it might match */
-            return true;
-    }
+    if (!bloom_filter_hash_value(bloom_filter, arrow_type, filter->value->constvalue, &hash))
+        return true;  /* Type not supported, can't exclude */
 
     /* FindHash returns false if definitely not present, true if might be present */
     return bloom_filter->FindHash(hash);

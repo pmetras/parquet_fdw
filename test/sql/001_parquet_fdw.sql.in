@@ -49,6 +49,12 @@ SELECT * FROM example1 WHERE seven > 1;
 SELECT * FROM example1 WHERE seven >= 1;
 SELECT * FROM example1 WHERE seven IS NULL;
 
+-- IN operator filtering (uses min/max statistics)
+SELECT * FROM example1 WHERE one IN (1, 2);
+SELECT * FROM example1 WHERE one IN (4, 5);
+SELECT * FROM example1 WHERE one IN (10, 20);  -- should skip all row groups
+SELECT * FROM example1 WHERE three IN ('foo', 'bar');
+
 -- prepared statements
 prepare prep(date) as select * from example1 where five < $1;
 execute prep('2018-01-03');

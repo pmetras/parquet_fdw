@@ -187,6 +187,41 @@ DEBUG:  parquet_fdw: adding globbed filename @abs_srcdir@/data/simple/example1.p
    5 | {13,14,15} | dos   | 2018-01-05 00:00:00.01 | 2018-01-05 | f   |      
 (2 rows)
 
+-- IN operator filtering (uses min/max statistics)
+SELECT * FROM example1 WHERE one IN (1, 2);
+DEBUG:  parquet_fdw: adding globbed filename @abs_srcdir@/data/simple/example1.parquet to list of files
+DEBUG:  parquet_fdw: skip rowgroup 2 in @abs_srcdir@/data/simple/example1.parquet (stats)
+ one |    two     | three |        four         |    five    | six | seven 
+-----+------------+-------+---------------------+------------+-----+-------
+   1 | {1,2,3}    | foo   | 2018-01-01 00:00:00 | 2018-01-01 | t   |   0.5
+   2 | {NULL,5,6} | bar   | 2018-01-02 00:00:00 | 2018-01-02 | f   |      
+(2 rows)
+
+SELECT * FROM example1 WHERE one IN (4, 5);
+DEBUG:  parquet_fdw: adding globbed filename @abs_srcdir@/data/simple/example1.parquet to list of files
+DEBUG:  parquet_fdw: skip rowgroup 1 in @abs_srcdir@/data/simple/example1.parquet (stats)
+ one |    two     | three |          four          |    five    | six | seven 
+-----+------------+-------+------------------------+------------+-----+-------
+   4 | {10,11,12} | uno   | 2018-01-04 00:00:10    | 2018-01-04 | f   |   1.5
+   5 | {13,14,15} | dos   | 2018-01-05 00:00:00.01 | 2018-01-05 | f   |      
+(2 rows)
+
+SELECT * FROM example1 WHERE one IN (10, 20);  -- should skip all row groups
+DEBUG:  parquet_fdw: adding globbed filename @abs_srcdir@/data/simple/example1.parquet to list of files
+DEBUG:  parquet_fdw: skip rowgroup 1 in @abs_srcdir@/data/simple/example1.parquet (stats)
+DEBUG:  parquet_fdw: skip rowgroup 2 in @abs_srcdir@/data/simple/example1.parquet (stats)
+ one | two | three | four | five | six | seven 
+-----+-----+-------+------+------+-----+-------
+(0 rows)
+
+SELECT * FROM example1 WHERE three IN ('foo', 'bar');
+DEBUG:  parquet_fdw: adding globbed filename @abs_srcdir@/data/simple/example1.parquet to list of files
+ one |    two     | three |        four         |    five    | six | seven 
+-----+------------+-------+---------------------+------------+-----+-------
+   1 | {1,2,3}    | foo   | 2018-01-01 00:00:00 | 2018-01-01 | t   |   0.5
+   2 | {NULL,5,6} | bar   | 2018-01-02 00:00:00 | 2018-01-02 | f   |      
+(2 rows)
+
 -- prepared statements
 prepare prep(date) as select * from example1 where five < $1;
 execute prep('2018-01-03');

@@ -568,8 +568,17 @@ The FDW uses multiple techniques to skip row groups that cannot contain matching
 
 **Min/Max Statistics Pruning:**
 - Parquet stores min/max values per column per row group
-- Works for comparison operators: `=`, `<`, `<=`, `>`, `>=`
+- Works for comparison operators: `=`, `<`, `<=`, `>`, `>=`, `IN`
 - Supported types: integers, floats, booleans, strings, dates, timestamps
+
+**IN Operator Pruning:**
+- For `IN (value1, value2, ...)` filters, row groups are pruned if none of the values fall within the min/max range
+- Example: `WHERE id IN (100, 200, 300)` will skip row groups where max < 100 or min > 300
+
+**NULL Statistics Pruning:**
+- Uses Parquet's `null_count` statistics per column per row group
+- `IS NULL` skips row groups where `null_count = 0`
+- `IS NOT NULL` skips row groups where all values are NULL (`null_count = num_values`)
 
 **Bloom Filter Pruning:**
 - For equality filters (`=`), bloom filters provide additional pruning when min/max statistics are ineffective
