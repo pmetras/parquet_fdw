@@ -107,6 +107,10 @@ arrow::DataType *get_arrow_list_elem_type(arrow::DataType *type);
 void datum_to_jsonb(Datum value, Oid typoid, bool isnull, FmgrInfo *outfunc,
                     JsonbParseState *result, bool iskey);
 int32 string_to_int32(const char *s);
+int16 string_to_int16(const char *s);
+int64 string_to_int64(const char *s);
+float4 string_to_float4(const char *s);
+float8 string_to_float8(const char *s);
 
 /*
  * Hive partition extraction function types

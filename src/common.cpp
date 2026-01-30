@@ -1,6 +1,8 @@
 #include "common.hpp"
 
 #include <cctype>
+#include <cfloat>
+#include <climits>
 #include <cstring>
 #include <regex>
 
@@ -397,6 +399,152 @@ string_to_int32(const char *s)
 }
 
 /*
+ * string_to_int16
+ *      Convert string to int16 with proper error handling.
+ */
+int16
+string_to_int16(const char *s)
+{
+    int32 result = string_to_int32(s);
+
+    if (result < SHRT_MIN || result > SHRT_MAX)
+        ereport(ERROR,
+                (errcode(ERRCODE_NUMERIC_VALUE_OUT_OF_RANGE),
+                 errmsg("value \"%s\" is out of range for type %s", s, "smallint")));
+
+    return (int16) result;
+}
+
+/*
+ * string_to_int64
+ *      Convert string to int64 with proper error handling.
+ */
+int64
+string_to_int64(const char *s)
+{
+    long long   l;
+    char       *badp;
+
+    if (s == nullptr)
+        elog(ERROR, "NULL pointer");
+    if (*s == 0)
+        ereport(ERROR,
+                (errcode(ERRCODE_INVALID_TEXT_REPRESENTATION),
+                 errmsg("invalid input syntax for type %s: \"%s\"", "bigint", s)));
+
+    errno = 0;
+    l = strtoll(s, &badp, 10);
+
+    if (s == badp)
+        ereport(ERROR,
+                (errcode(ERRCODE_INVALID_TEXT_REPRESENTATION),
+                 errmsg("invalid input syntax for type %s: \"%s\"", "bigint", s)));
+
+    if (errno == ERANGE)
+        ereport(ERROR,
+                (errcode(ERRCODE_NUMERIC_VALUE_OUT_OF_RANGE),
+                 errmsg("value \"%s\" is out of range for type %s", s, "bigint")));
+
+    while (*badp && *badp != '\0' && isspace((unsigned char) *badp))
+        badp++;
+
+    if (*badp && *badp != '\0')
+        ereport(ERROR,
+                (errcode(ERRCODE_INVALID_TEXT_REPRESENTATION),
+                 errmsg("invalid input syntax for type %s: \"%s\"", "bigint", s)));
+
+    return (int64) l;
+}
+
+/*
+ * string_to_float4
+ *      Convert string to float4 with proper error handling.
+ */
+float4
+string_to_float4(const char *s)
+{
+    double      d;
+    char       *badp;
+
+    if (s == nullptr)
+        elog(ERROR, "NULL pointer");
+    if (*s == 0)
+        ereport(ERROR,
+                (errcode(ERRCODE_INVALID_TEXT_REPRESENTATION),
+                 errmsg("invalid input syntax for type %s: \"%s\"", "real", s)));
+
+    errno = 0;
+    d = strtod(s, &badp);
+
+    if (s == badp)
+        ereport(ERROR,
+                (errcode(ERRCODE_INVALID_TEXT_REPRESENTATION),
+                 errmsg("invalid input syntax for type %s: \"%s\"", "real", s)));
+
+    if (errno == ERANGE)
+        ereport(ERROR,
+                (errcode(ERRCODE_NUMERIC_VALUE_OUT_OF_RANGE),
+                 errmsg("value \"%s\" is out of range for type %s", s, "real")));
+
+    /* Check if value fits in float4 range */
+    if (d != 0 && (d < -FLT_MAX || d > FLT_MAX || (d > -FLT_MIN && d < FLT_MIN && d != 0)))
+        ereport(ERROR,
+                (errcode(ERRCODE_NUMERIC_VALUE_OUT_OF_RANGE),
+                 errmsg("value \"%s\" is out of range for type %s", s, "real")));
+
+    while (*badp && *badp != '\0' && isspace((unsigned char) *badp))
+        badp++;
+
+    if (*badp && *badp != '\0')
+        ereport(ERROR,
+                (errcode(ERRCODE_INVALID_TEXT_REPRESENTATION),
+                 errmsg("invalid input syntax for type %s: \"%s\"", "real", s)));
+
+    return (float4) d;
+}
+
+/*
+ * string_to_float8
+ *      Convert string to float8 with proper error handling.
+ */
+float8
+string_to_float8(const char *s)
+{
+    double      d;
+    char       *badp;
+
+    if (s == nullptr)
+        elog(ERROR, "NULL pointer");
+    if (*s == 0)
+        ereport(ERROR,
+                (errcode(ERRCODE_INVALID_TEXT_REPRESENTATION),
+                 errmsg("invalid input syntax for type %s: \"%s\"", "double precision", s)));
+
+    errno = 0;
+    d = strtod(s, &badp);
+
+    if (s == badp)
+        ereport(ERROR,
+                (errcode(ERRCODE_INVALID_TEXT_REPRESENTATION),
+                 errmsg("invalid input syntax for type %s: \"%s\"", "double precision", s)));
+
+    if (errno == ERANGE)
+        ereport(ERROR,
+                (errcode(ERRCODE_NUMERIC_VALUE_OUT_OF_RANGE),
+                 errmsg("value \"%s\" is out of range for type %s", s, "double precision")));
+
+    while (*badp && *badp != '\0' && isspace((unsigned char) *badp))
+        badp++;
+
+    if (*badp && *badp != '\0')
+        ereport(ERROR,
+                (errcode(ERRCODE_INVALID_TEXT_REPRESENTATION),
+                 errmsg("invalid input syntax for type %s: \"%s\"", "double precision", s)));
+
+    return (float8) d;
+}
+
+/*
  * Hive partition helper function implementations
  */
 
@@ -591,15 +739,15 @@ string_to_datum(const char *value, Oid pg_type, bool *isnull)
     switch (pg_type)
     {
         case INT2OID:
-            return Int16GetDatum((int16) atoi(value));
+            return Int16GetDatum(string_to_int16(value));
         case INT4OID:
-            return Int32GetDatum(atoi(value));
+            return Int32GetDatum(string_to_int32(value));
         case INT8OID:
-            return Int64GetDatum(atoll(value));
+            return Int64GetDatum(string_to_int64(value));
         case FLOAT4OID:
-            return Float4GetDatum((float4) atof(value));
+            return Float4GetDatum(string_to_float4(value));
         case FLOAT8OID:
-            return Float8GetDatum(atof(value));
+            return Float8GetDatum(string_to_float8(value));
         case TEXTOID:
         case VARCHAROID:
             return CStringGetTextDatum(value);

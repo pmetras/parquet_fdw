@@ -321,11 +321,16 @@ The FDW translates the date range to partition boundaries and includes all parti
 - **Type inference:** Numeric-looking values become integers; others become text.
 - **NULL values:** The special value `__HIVE_DEFAULT_PARTITION__` is converted to SQL NULL.
 - **URL encoding:** Percent-encoded values are decoded automatically (e.g., `%20` → space, `%2F` → `/`).
+- **Type validation:** Invalid partition values (e.g., non-numeric text for INT columns) raise proper PostgreSQL errors instead of silently converting to 0.
 
 ```sql
 -- Directory: region=North%20America/data.parquet
 -- The region column will contain "North America" (decoded)
 SELECT * FROM sales WHERE region = 'North America';
+
+-- Directory: category=__HIVE_DEFAULT_PARTITION__/data.parquet
+-- The category column will be NULL for these rows
+SELECT * FROM data WHERE category IS NULL;
 ```
 
 ### Column Conflict: File vs Path

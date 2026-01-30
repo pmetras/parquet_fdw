@@ -496,3 +496,27 @@ for year, month, data in range_test_partitions:
         writer.write_table(table)
 
 print("Generated range spanning test data in hive/range_test/")
+
+# Test 5: NULL partition values (__HIVE_DEFAULT_PARTITION__)
+# Hive uses __HIVE_DEFAULT_PARTITION__ to represent NULL values in partitions
+null_partition_schema = pa.schema([
+    pa.field('id', pa.int64()),
+    pa.field('value', pa.float64()),
+])
+
+null_partition_data = [
+    ('known', [{'id': 1, 'value': 100.0}, {'id': 2, 'value': 200.0}]),
+    ('__HIVE_DEFAULT_PARTITION__', [{'id': 3, 'value': 300.0}, {'id': 4, 'value': 400.0}]),
+]
+
+for category, data in null_partition_data:
+    dir_path = f'hive/null_partition/category={category}'
+    os.makedirs(dir_path, exist_ok=True)
+
+    df = pd.DataFrame(data)
+    table = pa.Table.from_pandas(df, schema=null_partition_schema, preserve_index=False)
+
+    with pq.ParquetWriter(f'{dir_path}/data.parquet', null_partition_schema) as writer:
+        writer.write_table(table)
+
+print("Generated NULL partition test data in hive/null_partition/")

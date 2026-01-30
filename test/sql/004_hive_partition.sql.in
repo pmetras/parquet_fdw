@@ -223,6 +223,31 @@ SELECT * FROM hive_range_test WHERE event_date >= '2025-03-01' ORDER BY id;
 
 DROP FOREIGN TABLE hive_range_test;
 
+-- Test 10: NULL partition values (__HIVE_DEFAULT_PARTITION__)
+-- Hive uses __HIVE_DEFAULT_PARTITION__ to represent NULL values in partitions
+-- The FDW should convert this to SQL NULL
+CREATE FOREIGN TABLE hive_null_partition (
+    id BIGINT,
+    value FLOAT8,
+    category TEXT    -- virtual column from path, some rows will be NULL
+)
+SERVER parquet_srv
+OPTIONS (
+    filename '@abs_srcdir@/data/hive/null_partition/category=known/data.parquet @abs_srcdir@/data/hive/null_partition/category=__HIVE_DEFAULT_PARTITION__/data.parquet',
+    hive_partitioning 'true'
+);
+
+-- Verify all data - rows with __HIVE_DEFAULT_PARTITION__ should show NULL
+SELECT * FROM hive_null_partition ORDER BY id;
+
+-- Filter for NULL category
+SELECT * FROM hive_null_partition WHERE category IS NULL ORDER BY id;
+
+-- Filter for non-NULL category
+SELECT * FROM hive_null_partition WHERE category = 'known' ORDER BY id;
+
+DROP FOREIGN TABLE hive_null_partition;
+
 -- Clean up
 DROP FOREIGN TABLE hive_basic;
 DROP FOREIGN TABLE hive_region;

@@ -2314,6 +2314,8 @@ parquetGetForeignPlan(PlannerInfo * /* root */,
     params = lappend(params, makeInteger(fdw_private->max_open_files));
     params = lappend(params, fdw_private->rowgroups);
     params = lappend(params, makeInteger(fdw_private->hive_partitioning));
+    params = lappend(params, fdw_private->partition_map ?
+                     makeString(pstrdup(fdw_private->partition_map)) : makeString(pstrdup("")));
 
 	/* Create the ForeignScan node */
 	return make_foreignscan(tlist,
@@ -2344,6 +2346,7 @@ parquetBeginForeignScan(ForeignScanState *node, int /* eflags */)
     bool            use_mmap = false;
     bool            use_threads = false;
     bool            hive_partitioning = false;
+    char           *partition_map = nullptr;
     int             i = 0;
     ReaderType      reader_type = RT_SINGLE;
     int             max_open_files = 0;
@@ -2382,6 +2385,12 @@ parquetBeginForeignScan(ForeignScanState *node, int /* eflags */)
                 break;
             case 8:
                 hive_partitioning = (bool) intVal(lfirst(lc));
+                break;
+            case 9:
+                {
+                    char *pm = strVal(lfirst(lc));
+                    partition_map = (pm && pm[0] != '\0') ? pm : nullptr;
+                }
                 break;
         }
         ++i;
