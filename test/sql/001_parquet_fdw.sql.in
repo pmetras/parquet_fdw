@@ -55,6 +55,10 @@ SELECT * FROM example1 WHERE one IN (4, 5);
 SELECT * FROM example1 WHERE one IN (10, 20);  -- should skip all row groups
 SELECT * FROM example1 WHERE three IN ('foo', 'bar');
 
+-- LIKE prefix filtering (uses min/max statistics for string columns)
+SELECT * FROM example1 WHERE three LIKE 'fo%';
+SELECT * FROM example1 WHERE three LIKE 'z%';  -- should skip row groups where max < 'z'
+
 -- prepared statements
 prepare prep(date) as select * from example1 where five < $1;
 execute prep('2018-01-03');

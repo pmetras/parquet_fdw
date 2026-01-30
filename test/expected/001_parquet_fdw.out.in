@@ -222,6 +222,20 @@ DEBUG:  parquet_fdw: adding globbed filename @abs_srcdir@/data/simple/example1.p
    2 | {NULL,5,6} | bar   | 2018-01-02 00:00:00 | 2018-01-02 | f   |      
 (2 rows)
 
+-- LIKE prefix filtering (uses min/max statistics for string columns)
+SELECT * FROM example1 WHERE three LIKE 'fo%';
+DEBUG:  parquet_fdw: adding globbed filename @abs_srcdir@/data/simple/example1.parquet to list of files
+ one |   two   | three |        four         |    five    | six | seven 
+-----+---------+-------+---------------------+------------+-----+-------
+   1 | {1,2,3} | foo   | 2018-01-01 00:00:00 | 2018-01-01 | t   |   0.5
+(1 row)
+
+SELECT * FROM example1 WHERE three LIKE 'z%';  -- should skip row groups where max < 'z'
+DEBUG:  parquet_fdw: adding globbed filename @abs_srcdir@/data/simple/example1.parquet to list of files
+ one | two | three | four | five | six | seven 
+-----+-----+-------+------+------+-----+-------
+(0 rows)
+
 -- prepared statements
 prepare prep(date) as select * from example1 where five < $1;
 execute prep('2018-01-03');

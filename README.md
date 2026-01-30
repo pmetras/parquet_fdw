@@ -589,6 +589,11 @@ The FDW uses multiple techniques to skip row groups that cannot contain matching
 - `IS NULL` skips row groups where `null_count = 0`
 - `IS NOT NULL` skips row groups where all values are NULL (`null_count = num_values`)
 
+**LIKE Prefix Pruning:**
+- For patterns like `'prefix%'`, uses min/max statistics on string columns
+- Skips row groups where `max < prefix` or `min > prefix`
+- Only works for patterns with a fixed prefix before the first wildcard
+
 **Bloom Filter Pruning:**
 - For equality filters (`=`), bloom filters provide additional pruning when min/max statistics are ineffective
 - Particularly useful for high-cardinality columns where each row group contains diverse values

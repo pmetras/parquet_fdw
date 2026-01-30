@@ -33,6 +33,7 @@ extern "C"
 #include "access/sysattr.h"
 #include "catalog/pg_collation_d.h"
 #include "catalog/pg_foreign_table.h"
+#include "catalog/pg_operator_d.h"
 #include "catalog/pg_type.h"
 #include "commands/defrem.h"
 #include "commands/explain.h"
@@ -125,6 +126,8 @@ struct RowGroupFilter
     bool        is_array;       /* true if this is an IN operator filter */
     bool        is_null_test;   /* true if this is an IS NULL / IS NOT NULL filter */
     NullTestType null_test_type;/* IS_NULL or IS_NOT_NULL */
+    bool        is_like_prefix; /* true if this is a LIKE 'prefix%' filter */
+    char       *like_prefix;    /* extracted prefix from LIKE pattern */
 };
 
 /*
@@ -580,7 +583,74 @@ extract_rowgroup_filters(List *scan_clauses,
                  */
                 if ((strategy = get_strategy(v->vartype, opno, GIN_AM_OID)) == 0
                     || strategy != JsonbExistsStrategyNumber)
+                {
+                    /*
+                     * Check if it's a LIKE operator with a prefix pattern.
+                     * We can use min/max statistics for patterns like 'prefix%'.
+                     */
+                    if (opno == OID_TEXT_LIKE_OP || opno == OID_BPCHAR_LIKE_OP ||
+                        opno == OID_NAME_LIKE_OP)
+                    {
+                        /* Extract prefix from LIKE pattern */
+                        if (!c->constisnull)
+                        {
+                            text *pattern = DatumGetTextPP(c->constvalue);
+                            char *pattern_str = text_to_cstring(pattern);
+                            size_t pattern_len = strlen(pattern_str);
+
+                            /* Find first wildcard (% or _) */
+                            size_t prefix_len = 0;
+                            bool has_escape = false;
+                            for (size_t i = 0; i < pattern_len; i++)
+                            {
+                                if (pattern_str[i] == '\\' && !has_escape)
+                                {
+                                    has_escape = true;
+                                    continue;
+                                }
+                                if (!has_escape && (pattern_str[i] == '%' || pattern_str[i] == '_'))
+                                    break;
+                                has_escape = false;
+                                prefix_len = i + 1;
+                            }
+
+                            /* Only useful if there's a non-empty prefix */
+                            if (prefix_len > 0)
+                            {
+                                char *prefix = (char *) palloc(prefix_len + 1);
+                                memcpy(prefix, pattern_str, prefix_len);
+                                prefix[prefix_len] = '\0';
+
+                                RowGroupFilter f
+                                {
+                                    .attnum = v->varattno,
+                                    .is_key = false,
+                                    .value = NULL,
+                                    .values = NIL,
+                                    .strategy = 0,
+                                    .is_array = false,
+                                    .is_null_test = false,
+                                    .is_like_prefix = true,
+                                    .like_prefix = prefix,
+                                };
+
+                                bool error = false;
+                                try {
+                                    filters.push_back(f);
+                                } catch (std::exception &e) {
+                                    error = true;
+                                }
+                                if (error)
+                                    elog(ERROR, "extracting row filters failed");
+
+                                pfree(pattern_str);
+                                continue;  /* Already added */
+                            }
+                            pfree(pattern_str);
+                        }
+                    }
                     continue;
+                }
                 is_key = true;
             }
         }
@@ -696,6 +766,9 @@ extract_rowgroup_filters(List *scan_clauses,
                 .values = values_list,
                 .strategy = BTEqualStrategyNumber,
                 .is_array = true,
+                .is_null_test = false,
+                .is_like_prefix = false,
+                .like_prefix = NULL,
             };
 
             bool error = false;
@@ -733,6 +806,8 @@ extract_rowgroup_filters(List *scan_clauses,
                 .is_array = false,
                 .is_null_test = true,
                 .null_test_type = nt->nulltesttype,
+                .is_like_prefix = false,
+                .like_prefix = NULL,
             };
 
             bool error = false;
@@ -758,6 +833,8 @@ extract_rowgroup_filters(List *scan_clauses,
             .strategy = strategy,
             .is_array = false,
             .is_null_test = false,
+            .is_like_prefix = false,
+            .like_prefix = NULL,
         };
 
         /* potentially inserting elements may throw exceptions */
@@ -954,6 +1031,54 @@ row_group_matches_filter(parquet::Statistics *stats,
             if (null_count == num_values && num_values > 0)
                 return false;
         }
+        return true;
+    }
+
+    /*
+     * Handle LIKE prefix filters.
+     * For pattern 'prefix%', skip row group if:
+     * - max < prefix (all values sort before the prefix)
+     * - min > prefix + '\xff...' (all values sort after any string starting with prefix)
+     */
+    if (filter->is_like_prefix && filter->like_prefix)
+    {
+        /* Only works for string types */
+        if (arrow_type->id() != arrow::Type::STRING &&
+            arrow_type->id() != arrow::Type::BINARY)
+            return true;
+
+        std::string min_str = stats->EncodeMin();
+        std::string max_str = stats->EncodeMax();
+        std::string prefix(filter->like_prefix);
+
+        /*
+         * If max < prefix, no string in this row group can start with prefix.
+         * We compare using strncmp with prefix length.
+         */
+        if (max_str.length() < prefix.length())
+        {
+            /* max is shorter than prefix, compare what we have */
+            if (max_str < prefix.substr(0, max_str.length()))
+                return false;
+        }
+        else
+        {
+            /* Compare prefix-length portion */
+            if (max_str.substr(0, prefix.length()) < prefix)
+                return false;
+        }
+
+        /*
+         * If min > prefix + '\xff\xff...', no string can start with prefix.
+         * For simplicity, we check if min starts with something > prefix.
+         */
+        if (min_str.length() >= prefix.length())
+        {
+            std::string min_prefix = min_str.substr(0, prefix.length());
+            if (min_prefix > prefix)
+                return false;
+        }
+
         return true;
     }
 
