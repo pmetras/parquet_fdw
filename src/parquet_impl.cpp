@@ -15,6 +15,9 @@ namespace fs = std::filesystem;
 #include "parquet/arrow/schema.h"
 #include "parquet/file_reader.h"
 #include "parquet/statistics.h"
+#include "parquet/bloom_filter.h"
+#include "parquet/bloom_filter_reader.h"
+#include "arrow/io/file.h"
 
 #include "exec_state.hpp"
 #include "reader.hpp"
@@ -854,6 +857,80 @@ row_group_matches_filter(parquet::Statistics *stats,
     return true;
 }
 
+/*
+ * row_group_matches_bloom_filter
+ *      Check if the value could be present in the row group using bloom filter.
+ *      Only works for equality filters (BTEqualStrategyNumber).
+ *      Returns true if value might be present, false if definitely not present.
+ */
+static bool
+row_group_matches_bloom_filter(parquet::BloomFilter *bloom_filter,
+                               const arrow::DataType *arrow_type,
+                               RowGroupFilter *filter)
+{
+    uint64_t hash;
+    Datum val = filter->value->constvalue;
+
+    /* Only equality filters can use bloom filters */
+    if (filter->strategy != BTEqualStrategyNumber)
+        return true;
+
+    /* NULL values can't be checked against bloom filter */
+    if (filter->value->constisnull)
+        return true;
+
+    switch (arrow_type->id())
+    {
+        case arrow::Type::INT8:
+        case arrow::Type::INT16:
+        case arrow::Type::INT32:
+            {
+                int32_t v = DatumGetInt32(val);
+                hash = bloom_filter->Hash(v);
+                break;
+            }
+
+        case arrow::Type::INT64:
+            {
+                int64_t v = DatumGetInt64(val);
+                hash = bloom_filter->Hash(v);
+                break;
+            }
+
+        case arrow::Type::FLOAT:
+            {
+                float v = DatumGetFloat4(val);
+                hash = bloom_filter->Hash(v);
+                break;
+            }
+
+        case arrow::Type::DOUBLE:
+            {
+                double v = DatumGetFloat8(val);
+                hash = bloom_filter->Hash(v);
+                break;
+            }
+
+        case arrow::Type::STRING:
+        case arrow::Type::BINARY:
+            {
+                text *t = DatumGetTextPP(val);
+                parquet::ByteArray ba;
+                ba.ptr = (const uint8_t *) VARDATA_ANY(t);
+                ba.len = VARSIZE_ANY_EXHDR(t);
+                hash = bloom_filter->Hash(&ba);
+                break;
+            }
+
+        default:
+            /* Type not supported for bloom filter, assume it might match */
+            return true;
+    }
+
+    /* FindHash returns false if definitely not present, true if might be present */
+    return bloom_filter->FindHash(hash);
+}
+
 typedef enum
 {
     PS_START = 0,
@@ -1270,22 +1347,39 @@ extract_rowgroups_list(const char *filename,
                        uint64 *total_rows) noexcept
 {
     std::unique_ptr<parquet::arrow::FileReader> reader;
+    std::unique_ptr<parquet::BloomFilterReader> bloom_reader;
     List           *rowgroups = NIL;
     std::string     error;
 
     /* Open parquet file to read meta information */
     try
     {
+        /* Open file as RandomAccessFile for both ParquetFileReader and BloomFilterReader */
+        auto file_result = arrow::io::ReadableFile::Open(filename);
+        if (!file_result.ok())
+            throw Error("failed to open file: %s ('%s')",
+                        file_result.status().message().c_str(), filename);
+        auto input_file = std::move(file_result).ValueUnsafe();
+
+        /* Create ParquetFileReader from the input file */
+        auto parquet_reader = parquet::ParquetFileReader::Open(input_file);
+        auto meta = parquet_reader->metadata();
+
+        /* Create BloomFilterReader for equality filter optimization */
+        parquet::ReaderProperties reader_props;
+        bloom_reader = parquet::BloomFilterReader::Make(
+            input_file, meta, reader_props);
+
+        /* Create Arrow file reader for schema access */
         auto result = parquet::arrow::FileReader::Make(
                 arrow::default_memory_pool(),
-                parquet::ParquetFileReader::OpenFile(filename, false));
+                std::move(parquet_reader));
 
         if (!result.ok())
             throw Error("failed to open Parquet file: %s ('%s')",
                         result.status().message().c_str(), filename);
         reader = std::move(result).ValueUnsafe();
 
-        auto meta = reader->parquet_reader()->metadata();
         parquet::ArrowReaderProperties  props;
         parquet::arrow::SchemaManifest  manifest;
 
@@ -1365,13 +1459,37 @@ extract_rowgroups_list(const char *filename,
                         /*
                          * If at least one filter doesn't match rowgroup exclude
                          * the current row group and proceed with the next one.
+                         *
+                         * First check min/max statistics, then bloom filter for
+                         * equality predicates.
                          */
                         if (stats && !row_group_matches_filter(stats.get(),
                                                                field->type().get(),
                                                                &filter))
                         {
                             match = false;
-                            elog(DEBUG1, "parquet_fdw: skip rowgroup %d in %s", r + 1, filename);
+                            elog(DEBUG1, "parquet_fdw: skip rowgroup %d in %s (stats)", r + 1, filename);
+                        }
+
+                        /*
+                         * If min/max didn't exclude the row group and this is an
+                         * equality filter, try bloom filter for more precise pruning.
+                         */
+                        if (match && filter.strategy == BTEqualStrategyNumber && bloom_reader)
+                        {
+                            auto rg_bloom = bloom_reader->RowGroup(r);
+                            if (rg_bloom)
+                            {
+                                auto bloom = rg_bloom->GetColumnBloomFilter(column_index);
+                                if (bloom && !row_group_matches_bloom_filter(bloom.get(),
+                                                                             field->type().get(),
+                                                                             &filter))
+                                {
+                                    match = false;
+                                    elog(DEBUG1, "parquet_fdw: skip rowgroup %d in %s (bloom)",
+                                         r + 1, filename);
+                                }
+                            }
                         }
                     }
                     PG_CATCH();

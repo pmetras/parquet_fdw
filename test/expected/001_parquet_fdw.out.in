@@ -70,15 +70,15 @@ EXPLAIN (COSTS OFF) SELECT * FROM example1 ORDER BY three;
 SET client_min_messages = DEBUG1;
 SELECT * FROM example1 WHERE one < 1;
 DEBUG:  parquet_fdw: adding globbed filename @abs_srcdir@/data/simple/example1.parquet to list of files
-DEBUG:  parquet_fdw: skip rowgroup 1 in @abs_srcdir@/data/simple/example1.parquet
-DEBUG:  parquet_fdw: skip rowgroup 2 in @abs_srcdir@/data/simple/example1.parquet
+DEBUG:  parquet_fdw: skip rowgroup 1 in @abs_srcdir@/data/simple/example1.parquet (stats)
+DEBUG:  parquet_fdw: skip rowgroup 2 in @abs_srcdir@/data/simple/example1.parquet (stats)
  one | two | three | four | five | six | seven 
 -----+-----+-------+------+------+-----+-------
 (0 rows)
 
 SELECT * FROM example1 WHERE one <= 1;
 DEBUG:  parquet_fdw: adding globbed filename @abs_srcdir@/data/simple/example1.parquet to list of files
-DEBUG:  parquet_fdw: skip rowgroup 2 in @abs_srcdir@/data/simple/example1.parquet
+DEBUG:  parquet_fdw: skip rowgroup 2 in @abs_srcdir@/data/simple/example1.parquet (stats)
  one |   two   | three |        four         |    five    | six | seven 
 -----+---------+-------+---------------------+------------+-----+-------
    1 | {1,2,3} | foo   | 2018-01-01 00:00:00 | 2018-01-01 | t   |   0.5
@@ -86,15 +86,15 @@ DEBUG:  parquet_fdw: skip rowgroup 2 in @abs_srcdir@/data/simple/example1.parque
 
 SELECT * FROM example1 WHERE one > 6;
 DEBUG:  parquet_fdw: adding globbed filename @abs_srcdir@/data/simple/example1.parquet to list of files
-DEBUG:  parquet_fdw: skip rowgroup 1 in @abs_srcdir@/data/simple/example1.parquet
-DEBUG:  parquet_fdw: skip rowgroup 2 in @abs_srcdir@/data/simple/example1.parquet
+DEBUG:  parquet_fdw: skip rowgroup 1 in @abs_srcdir@/data/simple/example1.parquet (stats)
+DEBUG:  parquet_fdw: skip rowgroup 2 in @abs_srcdir@/data/simple/example1.parquet (stats)
  one | two | three | four | five | six | seven 
 -----+-----+-------+------+------+-----+-------
 (0 rows)
 
 SELECT * FROM example1 WHERE one >= 6;
 DEBUG:  parquet_fdw: adding globbed filename @abs_srcdir@/data/simple/example1.parquet to list of files
-DEBUG:  parquet_fdw: skip rowgroup 1 in @abs_srcdir@/data/simple/example1.parquet
+DEBUG:  parquet_fdw: skip rowgroup 1 in @abs_srcdir@/data/simple/example1.parquet (stats)
  one |    two     | three |           four            |    five    | six | seven 
 -----+------------+-------+---------------------------+------------+-----+-------
    6 | {16,17,18} | tres  | 2018-01-06 00:00:00.00001 | 2018-01-06 | f   |     2
@@ -102,7 +102,7 @@ DEBUG:  parquet_fdw: skip rowgroup 1 in @abs_srcdir@/data/simple/example1.parque
 
 SELECT * FROM example1 WHERE one = 2;
 DEBUG:  parquet_fdw: adding globbed filename @abs_srcdir@/data/simple/example1.parquet to list of files
-DEBUG:  parquet_fdw: skip rowgroup 2 in @abs_srcdir@/data/simple/example1.parquet
+DEBUG:  parquet_fdw: skip rowgroup 2 in @abs_srcdir@/data/simple/example1.parquet (stats)
  one |    two     | three |        four         |    five    | six | seven 
 -----+------------+-------+---------------------+------------+-----+-------
    2 | {NULL,5,6} | bar   | 2018-01-02 00:00:00 | 2018-01-02 | f   |      
@@ -110,15 +110,15 @@ DEBUG:  parquet_fdw: skip rowgroup 2 in @abs_srcdir@/data/simple/example1.parque
 
 SELECT * FROM example1 WHERE one = 7;
 DEBUG:  parquet_fdw: adding globbed filename @abs_srcdir@/data/simple/example1.parquet to list of files
-DEBUG:  parquet_fdw: skip rowgroup 1 in @abs_srcdir@/data/simple/example1.parquet
-DEBUG:  parquet_fdw: skip rowgroup 2 in @abs_srcdir@/data/simple/example1.parquet
+DEBUG:  parquet_fdw: skip rowgroup 1 in @abs_srcdir@/data/simple/example1.parquet (stats)
+DEBUG:  parquet_fdw: skip rowgroup 2 in @abs_srcdir@/data/simple/example1.parquet (stats)
  one | two | three | four | five | six | seven 
 -----+-----+-------+------+------+-----+-------
 (0 rows)
 
 SELECT * FROM example1 WHERE six = true;
 DEBUG:  parquet_fdw: adding globbed filename @abs_srcdir@/data/simple/example1.parquet to list of files
-DEBUG:  parquet_fdw: skip rowgroup 2 in @abs_srcdir@/data/simple/example1.parquet
+DEBUG:  parquet_fdw: skip rowgroup 2 in @abs_srcdir@/data/simple/example1.parquet (stats)
  one |   two   | three |        four         |    five    | six | seven 
 -----+---------+-------+---------------------+------------+-----+-------
    1 | {1,2,3} | foo   | 2018-01-01 00:00:00 | 2018-01-01 | t   |   0.5
@@ -137,7 +137,7 @@ DEBUG:  parquet_fdw: adding globbed filename @abs_srcdir@/data/simple/example1.p
 
 SELECT * FROM example1 WHERE seven < 1.5;
 DEBUG:  parquet_fdw: adding globbed filename @abs_srcdir@/data/simple/example1.parquet to list of files
-DEBUG:  parquet_fdw: skip rowgroup 2 in @abs_srcdir@/data/simple/example1.parquet
+DEBUG:  parquet_fdw: skip rowgroup 2 in @abs_srcdir@/data/simple/example1.parquet (stats)
  one |   two   | three |        four         |    five    | six | seven 
 -----+---------+-------+---------------------+------------+-----+-------
    1 | {1,2,3} | foo   | 2018-01-01 00:00:00 | 2018-01-01 | t   |   0.5
@@ -155,7 +155,7 @@ DEBUG:  parquet_fdw: adding globbed filename @abs_srcdir@/data/simple/example1.p
 
 SELECT * FROM example1 WHERE seven = 1.5;
 DEBUG:  parquet_fdw: adding globbed filename @abs_srcdir@/data/simple/example1.parquet to list of files
-DEBUG:  parquet_fdw: skip rowgroup 1 in @abs_srcdir@/data/simple/example1.parquet
+DEBUG:  parquet_fdw: skip rowgroup 1 in @abs_srcdir@/data/simple/example1.parquet (stats)
  one |    two     | three |        four         |    five    | six | seven 
 -----+------------+-------+---------------------+------------+-----+-------
    4 | {10,11,12} | uno   | 2018-01-04 00:00:10 | 2018-01-04 | f   |   1.5
@@ -163,7 +163,7 @@ DEBUG:  parquet_fdw: skip rowgroup 1 in @abs_srcdir@/data/simple/example1.parque
 
 SELECT * FROM example1 WHERE seven > 1;
 DEBUG:  parquet_fdw: adding globbed filename @abs_srcdir@/data/simple/example1.parquet to list of files
-DEBUG:  parquet_fdw: skip rowgroup 1 in @abs_srcdir@/data/simple/example1.parquet
+DEBUG:  parquet_fdw: skip rowgroup 1 in @abs_srcdir@/data/simple/example1.parquet (stats)
  one |    two     | three |           four            |    five    | six | seven 
 -----+------------+-------+---------------------------+------------+-----+-------
    4 | {10,11,12} | uno   | 2018-01-04 00:00:10       | 2018-01-04 | f   |   1.5
@@ -191,7 +191,7 @@ DEBUG:  parquet_fdw: adding globbed filename @abs_srcdir@/data/simple/example1.p
 prepare prep(date) as select * from example1 where five < $1;
 execute prep('2018-01-03');
 DEBUG:  parquet_fdw: adding globbed filename @abs_srcdir@/data/simple/example1.parquet to list of files
-DEBUG:  parquet_fdw: skip rowgroup 2 in @abs_srcdir@/data/simple/example1.parquet
+DEBUG:  parquet_fdw: skip rowgroup 2 in @abs_srcdir@/data/simple/example1.parquet (stats)
  one |    two     | three |        four         |    five    | six | seven 
 -----+------------+-------+---------------------+------------+-----+-------
    1 | {1,2,3}    | foo   | 2018-01-01 00:00:00 | 2018-01-01 | t   |   0.5
@@ -200,8 +200,8 @@ DEBUG:  parquet_fdw: skip rowgroup 2 in @abs_srcdir@/data/simple/example1.parque
 
 execute prep('2018-01-01');
 DEBUG:  parquet_fdw: adding globbed filename @abs_srcdir@/data/simple/example1.parquet to list of files
-DEBUG:  parquet_fdw: skip rowgroup 1 in @abs_srcdir@/data/simple/example1.parquet
-DEBUG:  parquet_fdw: skip rowgroup 2 in @abs_srcdir@/data/simple/example1.parquet
+DEBUG:  parquet_fdw: skip rowgroup 1 in @abs_srcdir@/data/simple/example1.parquet (stats)
+DEBUG:  parquet_fdw: skip rowgroup 2 in @abs_srcdir@/data/simple/example1.parquet (stats)
  one | two | three | four | five | six | seven 
 -----+-----+-------+------+------+-----+-------
 (0 rows)
@@ -589,7 +589,7 @@ DEBUG:  parquet_fdw: adding globbed filename @abs_srcdir@/data/complex/example3.
 
 SELECT * FROM example3 WHERE three = 3;
 DEBUG:  parquet_fdw: adding globbed filename @abs_srcdir@/data/complex/example3.parquet to list of files
-DEBUG:  parquet_fdw: skip rowgroup 1 in @abs_srcdir@/data/complex/example3.parquet
+DEBUG:  parquet_fdw: skip rowgroup 1 in @abs_srcdir@/data/complex/example3.parquet (stats)
  one | two | three 
 -----+-----+-------
 (0 rows)

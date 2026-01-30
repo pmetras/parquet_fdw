@@ -557,10 +557,49 @@ The FDW automatically extracts row count statistics from Parquet file metadata d
 
 **How it works:**
 1. During planning, the FDW reads metadata from each Parquet file
-2. Row group min/max statistics are used to prune row groups that don't match query filters
+2. Row group pruning reduces I/O by skipping row groups that can't match query filters
 3. The actual row count from matching row groups is used for cost estimation
 
 This enables PostgreSQL to choose optimal join strategies (hash join vs nested loop) and parallel query plans based on actual data sizes.
+
+### Row Group Pruning
+
+The FDW uses multiple techniques to skip row groups that cannot contain matching rows:
+
+**Min/Max Statistics Pruning:**
+- Parquet stores min/max values per column per row group
+- Works for comparison operators: `=`, `<`, `<=`, `>`, `>=`
+- Supported types: integers, floats, booleans, strings, dates, timestamps
+
+**Bloom Filter Pruning:**
+- For equality filters (`=`), bloom filters provide additional pruning when min/max statistics are ineffective
+- Particularly useful for high-cardinality columns where each row group contains diverse values
+- Parquet files must be written with bloom filters enabled for the relevant columns
+
+**Example:** For a query like `WHERE event_name = 'click'`, min/max statistics may not help if each row group contains events from 'a' to 'z'. However, if the Parquet file has bloom filters on `event_name`, the FDW can quickly exclude row groups that definitely don't contain 'click'.
+
+To enable bloom filters when writing Parquet files (PyArrow example):
+```python
+import pyarrow.parquet as pq
+
+pq.write_table(
+    table,
+    'events.parquet',
+    write_statistics=True,
+    write_batch_size=10000,
+    # Enable bloom filters for specific columns
+    column_encoding={'event_name': 'PLAIN'},
+    bloom_filter_columns=['event_name', 'user_id']
+)
+```
+
+Enable debug logging to see row group pruning in action:
+```sql
+SET client_min_messages = DEBUG1;
+SELECT * FROM events WHERE event_name = 'click';
+-- DEBUG: parquet_fdw: skip rowgroup 1 in events.parquet (stats)
+-- DEBUG: parquet_fdw: skip rowgroup 3 in events.parquet (bloom)
+```
 
 ### When to Run ANALYZE
 
