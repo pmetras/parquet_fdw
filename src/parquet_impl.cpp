@@ -18,6 +18,8 @@ namespace fs = std::filesystem;
 #include "parquet/statistics.h"
 #include "parquet/bloom_filter.h"
 #include "parquet/bloom_filter_reader.h"
+#include "parquet/column_reader.h"
+#include "parquet/column_page.h"
 #include "arrow/io/file.h"
 
 #include "exec_state.hpp"
@@ -1371,6 +1373,121 @@ row_group_matches_bloom_filter(parquet::BloomFilter *bloom_filter,
     return bloom_filter->FindHash(hash);
 }
 
+/*
+ * row_group_matches_dictionary
+ *      Check if the filter value exists in the column's dictionary.
+ *      Only works for dictionary-encoded columns with equality filters.
+ *      Returns true if value might be present, false if definitely not present.
+ */
+static bool
+row_group_matches_dictionary(parquet::ParquetFileReader *parquet_reader,
+                             int row_group_idx,
+                             int column_index,
+                             const arrow::DataType *arrow_type,
+                             RowGroupFilter *filter)
+{
+    /* Only equality filters can use dictionary filtering */
+    if (filter->strategy != BTEqualStrategyNumber)
+        return true;
+
+    /* Skip array filters for now - dictionary check for IN is more complex */
+    if (filter->is_array)
+        return true;
+
+    /* Check if column has dictionary encoding */
+    auto row_group = parquet_reader->metadata()->RowGroup(row_group_idx);
+    auto column_chunk = row_group->ColumnChunk(column_index);
+
+    if (!column_chunk->has_dictionary_page())
+        return true;  /* No dictionary, can't filter */
+
+    try
+    {
+        /* Get a row group reader */
+        auto rg_reader = parquet_reader->RowGroup(row_group_idx);
+        auto page_reader = rg_reader->GetColumnPageReader(column_index);
+
+        /* Read the first page - should be the dictionary page */
+        auto page = page_reader->NextPage();
+        if (!page || page->type() != parquet::PageType::DICTIONARY_PAGE)
+            return true;  /* No dictionary page found */
+
+        auto dict_page = std::static_pointer_cast<parquet::DictionaryPage>(page);
+        int32_t num_values = dict_page->num_values();
+        const uint8_t *dict_data = dict_page->data();
+
+        /* Search for the filter value in the dictionary based on type */
+        Datum filter_val = filter->value->constvalue;
+
+        switch (arrow_type->id())
+        {
+            case arrow::Type::INT32:
+            {
+                const int32_t *dict = reinterpret_cast<const int32_t*>(dict_data);
+                int32_t search_val = DatumGetInt32(filter_val);
+                for (int32_t i = 0; i < num_values; i++)
+                {
+                    if (dict[i] == search_val)
+                        return true;
+                }
+                return false;  /* Value not in dictionary */
+            }
+
+            case arrow::Type::INT64:
+            {
+                const int64_t *dict = reinterpret_cast<const int64_t*>(dict_data);
+                int64_t search_val = DatumGetInt64(filter_val);
+                for (int32_t i = 0; i < num_values; i++)
+                {
+                    if (dict[i] == search_val)
+                        return true;
+                }
+                return false;
+            }
+
+            case arrow::Type::STRING:
+            case arrow::Type::BINARY:
+            {
+                /*
+                 * String dictionaries use ByteArray format with length-prefixed values.
+                 * The format is: [len1][data1][len2][data2]...
+                 * where len is 4 bytes (uint32_t).
+                 */
+                text *t = DatumGetTextPP(filter_val);
+                const char *search_str = VARDATA_ANY(t);
+                int search_len = VARSIZE_ANY_EXHDR(t);
+
+                const uint8_t *ptr = dict_data;
+                for (int32_t i = 0; i < num_values; i++)
+                {
+                    /* Read length (4 bytes, little-endian) */
+                    uint32_t entry_len;
+                    memcpy(&entry_len, ptr, sizeof(uint32_t));
+                    ptr += sizeof(uint32_t);
+
+                    /* Compare */
+                    if ((int)entry_len == search_len &&
+                        memcmp(ptr, search_str, search_len) == 0)
+                        return true;
+
+                    ptr += entry_len;
+                }
+                return false;
+            }
+
+            default:
+                /* Type not supported for dictionary filtering */
+                return true;
+        }
+    }
+    catch (const std::exception &e)
+    {
+        /* If we fail to read dictionary, assume value might be present */
+        elog(DEBUG2, "parquet_fdw: dictionary read failed: %s", e.what());
+        return true;
+    }
+}
+
 typedef enum
 {
     PS_START = 0,
@@ -1929,6 +2046,24 @@ extract_rowgroups_list(const char *filename,
                                     elog(DEBUG1, "parquet_fdw: skip rowgroup %d in %s (bloom)",
                                          r + 1, filename);
                                 }
+                            }
+                        }
+
+                        /*
+                         * If still matching and this is an equality filter, try
+                         * dictionary filtering as a last resort.
+                         */
+                        if (match && filter.strategy == BTEqualStrategyNumber &&
+                            !filter.is_array && filter.value && !filter.value->constisnull)
+                        {
+                            if (!row_group_matches_dictionary(reader->parquet_reader(),
+                                                              r, column_index,
+                                                              field->type().get(),
+                                                              &filter))
+                            {
+                                match = false;
+                                elog(DEBUG1, "parquet_fdw: skip rowgroup %d in %s (dict)",
+                                     r + 1, filename);
                             }
                         }
                     }
