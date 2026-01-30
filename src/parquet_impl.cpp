@@ -2354,15 +2354,77 @@ estimate_costs(PlannerInfo *root, RelOptInfo *baserel, Cost *startup_cost,
     }
 
     /*
-     * Here we assume that parquet tuple cost is the same as regular tuple cost
-     * even though this is probably not true in many cases. Maybe we'll come up
-     * with a smarter idea later. Also we use actual number of rows in selected
-     * rowgroups to calculate cost as we need to process those rows regardless
-     * of whether they're gonna be filtered out or not.
+     * Cost estimation for Parquet foreign scan:
+     *
+     * 1. I/O cost: Based on estimated data size to read
+     *    - Use seq_page_cost as base (Parquet reads are sequential within row groups)
+     *    - Estimate pages from row count and average tuple width
+     *    - Apply column projection factor (fewer columns = less I/O)
+     *
+     * 2. CPU cost: Processing each tuple
+     *    - Tuple processing cost
+     *    - Filter evaluation cost
+     *    - Decompression overhead (Parquet is typically compressed)
+     *
+     * 3. Startup cost: Opening files and reading metadata
      */
-    *run_cost = fdw_private->matched_rows * cpu_tuple_cost;
-	*startup_cost = baserel->baserestrictcost.startup;
-	*total_cost = *startup_cost + *run_cost;
+
+    /* Count number of files and total row groups */
+    int num_files = list_length(fdw_private->filenames);
+    int num_rowgroups = 0;
+    ListCell *lc;
+    foreach(lc, fdw_private->rowgroups)
+    {
+        List *rg_list = (List *) lfirst(lc);
+        num_rowgroups += list_length(rg_list);
+    }
+
+    /*
+     * Estimate I/O cost:
+     * - Assume average row size of 100 bytes (typical for analytics data)
+     * - Apply column projection factor based on attrs_used
+     * - Use seq_page_cost since Parquet reads are sequential within row groups
+     */
+    double avg_row_size = 100.0;  /* bytes per row estimate */
+    int total_attrs = baserel->max_attr;
+    int used_attrs = bms_num_members(fdw_private->attrs_used);
+
+    /* Column projection factor: reading fewer columns reduces I/O */
+    double column_factor = (total_attrs > 0 && used_attrs > 0)
+        ? (double) used_attrs / total_attrs
+        : 1.0;
+    column_factor = Max(column_factor, 0.1);  /* At least 10% for metadata overhead */
+
+    /* Estimate pages to read */
+    double bytes_to_read = fdw_private->matched_rows * avg_row_size * column_factor;
+    double pages = ceil(bytes_to_read / BLCKSZ);
+
+    /* I/O cost using sequential page cost */
+    Cost io_cost = pages * seq_page_cost;
+
+    /*
+     * CPU cost:
+     * - Base tuple processing: cpu_tuple_cost per tuple
+     * - Decompression overhead: add 50% for typical Parquet compression
+     * - Filter evaluation: already in baserestrictcost
+     */
+    double decompression_factor = 1.5;
+    Cost cpu_cost = fdw_private->matched_rows * cpu_tuple_cost * decompression_factor;
+
+    /*
+     * Startup cost:
+     * - Per-file metadata reading cost
+     * - Base restriction cost startup
+     */
+    Cost file_open_cost = num_files * seq_page_cost * 10;  /* ~10 pages per file for metadata */
+
+    *startup_cost = baserel->baserestrictcost.startup + file_open_cost;
+    *run_cost = io_cost + cpu_cost;
+    *total_cost = *startup_cost + *run_cost;
+
+    elog(DEBUG2, "parquet_fdw: cost estimate: files=%d, rowgroups=%d, "
+         "column_factor=%.2f, pages=%.0f, io_cost=%.2f, cpu_cost=%.2f, total=%.2f",
+         num_files, num_rowgroups, column_factor, pages, io_cost, cpu_cost, *total_cost);
 
     baserel->rows = ntuples;
 }

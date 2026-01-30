@@ -562,6 +562,15 @@ The FDW automatically extracts row count statistics from Parquet file metadata d
 
 This enables PostgreSQL to choose optimal join strategies (hash join vs nested loop) and parallel query plans based on actual data sizes.
 
+**Cost Model:**
+The FDW uses a cost model that accounts for:
+- **I/O cost**: Based on estimated data size using `seq_page_cost`
+- **Column projection**: Fewer columns = less data to read
+- **CPU cost**: Tuple processing with decompression overhead
+- **Startup cost**: Per-file metadata reading
+
+This helps PostgreSQL make better decisions when choosing between different join strategies and parallel plans.
+
 ### Row Group Pruning
 
 The FDW uses multiple techniques to skip row groups that cannot contain matching rows:
