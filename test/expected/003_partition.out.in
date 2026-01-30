@@ -65,20 +65,19 @@ SELECT * FROM example_parent1 WHERE date = '2018-01-01';
 -- Postgres will sort by "token, date" because example_parent1 is partitioned
 -- by "date".
 EXPLAIN (COSTS OFF) SELECT * FROM example_parent1 WHERE id = 1 ORDER BY token, date;
-                           QUERY PLAN                           
-----------------------------------------------------------------
- Sort
+                        QUERY PLAN                        
+----------------------------------------------------------
+ Merge Append
    Sort Key: example_parent1.token, example_parent1.date
-   ->  Append
-         ->  Foreign Scan on example_child1_1 example_parent1_1
-               Filter: (id = 1)
-               Reader: Single File
-               Row groups: 1
-         ->  Foreign Scan on example_child1_2 example_parent1_2
-               Filter: (id = 1)
-               Reader: Single File
-               Row groups: 1
-(11 rows)
+   ->  Foreign Scan on example_child1_1 example_parent1_1
+         Filter: (id = 1)
+         Reader: Single File
+         Row groups: 1
+   ->  Foreign Scan on example_child1_2 example_parent1_2
+         Filter: (id = 1)
+         Reader: Single File
+         Row groups: 1
+(10 rows)
 
 SELECT * FROM example_parent1 WHERE id = 1 ORDER BY token, date;
  id | token |        date         | num 

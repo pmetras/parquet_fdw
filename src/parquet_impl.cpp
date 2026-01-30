@@ -202,7 +202,24 @@ partition_matches_filter(const HivePartitionValue &pv, const RowGroupFilter &fil
     if (pv.key != colname)
         return true;  /* filter is for a different column */
 
-    /* Skip NULL partition values - can't prune on them */
+    /*
+     * Handle IS NULL / IS NOT NULL filters on partition columns.
+     */
+    if (filter.is_null_test)
+    {
+        if (filter.null_test_type == IS_NULL)
+        {
+            /* IS NULL: matches only if partition value is NULL */
+            return pv.isnull;
+        }
+        else /* IS_NOT_NULL */
+        {
+            /* IS NOT NULL: matches only if partition value is not NULL */
+            return !pv.isnull;
+        }
+    }
+
+    /* Skip NULL partition values - can't prune on them for value comparisons */
     if (pv.isnull)
         return true;
 
@@ -212,8 +229,8 @@ partition_matches_filter(const HivePartitionValue &pv, const RowGroupFilter &fil
     if (isnull)
         return true;
 
-    /* Get the filter constant value */
-    if (filter.value->constisnull)
+    /* Get the filter constant value (should not be NULL for value comparisons) */
+    if (filter.value == nullptr || filter.value->constisnull)
         return true;
 
     Datum filter_datum = filter.value->constvalue;

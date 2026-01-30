@@ -564,14 +564,18 @@ EXPLAIN (COSTS OFF) SELECT * FROM example_sorted;
 (7 rows)
 
 EXPLAIN (COSTS OFF) SELECT * FROM example_sorted ORDER BY one;
-           QUERY PLAN           
---------------------------------
- Foreign Scan on example_sorted
-   Reader: Multifile
-   Row groups: 
-     example1.parquet: 1, 2
-     example2.parquet: 1
-(5 rows)
+                     QUERY PLAN                      
+-----------------------------------------------------
+ Sort
+   Sort Key: one
+   ->  Gather
+         Workers Planned: 11
+         ->  Parallel Foreign Scan on example_sorted
+               Reader: Multifile
+               Row groups: 
+                 example1.parquet: 1, 2
+                 example2.parquet: 1
+(9 rows)
 
 EXPLAIN (COSTS OFF) SELECT * FROM example_sorted ORDER BY two;
                      QUERY PLAN                      
@@ -589,14 +593,18 @@ EXPLAIN (COSTS OFF) SELECT * FROM example_sorted ORDER BY two;
 
 ALTER FOREIGN TABLE example_sorted OPTIONS (ADD files_in_order 'true');
 EXPLAIN (COSTS OFF) SELECT * FROM example_sorted ORDER BY one;
-           QUERY PLAN           
---------------------------------
- Foreign Scan on example_sorted
-   Reader: Multifile
-   Row groups: 
-     example1.parquet: 1, 2
-     example2.parquet: 1
-(5 rows)
+                     QUERY PLAN                      
+-----------------------------------------------------
+ Sort
+   Sort Key: one
+   ->  Gather
+         Workers Planned: 11
+         ->  Parallel Foreign Scan on example_sorted
+               Reader: Multifile
+               Row groups: 
+                 example1.parquet: 1, 2
+                 example2.parquet: 1
+(9 rows)
 
 EXPLAIN (COSTS OFF) SELECT * FROM example1;
                QUERY PLAN                
@@ -667,12 +675,16 @@ CREATE FOREIGN TABLE example_multisort (
 SERVER parquet_srv
 OPTIONS (filename '@abs_srcdir@/data/simple/example1.parquet', sorted 'one five');
 EXPLAIN (COSTS OFF) SELECT * FROM example_multisort ORDER BY one, five;
-            QUERY PLAN             
------------------------------------
- Foreign Scan on example_multisort
-   Reader: Single File
-   Row groups: 1, 2
-(3 rows)
+                       QUERY PLAN                       
+--------------------------------------------------------
+ Sort
+   Sort Key: one, five
+   ->  Gather
+         Workers Planned: 11
+         ->  Parallel Foreign Scan on example_multisort
+               Reader: Single File
+               Row groups: 1, 2
+(7 rows)
 
 SELECT * FROM example_multisort ORDER BY one, five;
  one |    two     | three |           four            |    five    | six 
