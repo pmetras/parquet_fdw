@@ -1,10 +1,12 @@
 Package: postgresql-17-parquet-fdw
-Version: 0.2
+Version: 0.2.20260129181549
 Section: database
 Priority: optional
 Architecture: amd64
 Maintainer: Pierre Métras <p.metras@nfb.ca>
-Depends: postgresql-17
+Depends: postgresql-17, libarrow2300, libparquet2300
+Conflicts: postgresql-parquet-fdw
+Replaces: postgresql-parquet-fdw
 Description: Apache Parquet foreign data wrapper for PostgreSQL 17
  Read-only foreign data wrapper for Apache Parquet files.
  .
@@ -14,4 +16,5 @@ Description: Apache Parquet foreign data wrapper for PostgreSQL 17
   - Hive-style partitioning with partition pruning
   - Parallel query execution
  .
+ Built: 20260129181549 (git: eca9d7f)
  See https://github.com/pmetras/parquet_fdw
