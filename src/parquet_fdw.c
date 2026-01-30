@@ -57,6 +57,11 @@ extern void parquetInitializeDSMForeignScan(ForeignScanState *node,
 extern void parquetReInitializeDSMForeignScan(ForeignScanState *node,
                                               ParallelContext *pcxt,
                                               void *coordinate);
+extern void parquetGetForeignUpperPaths(PlannerInfo *root,
+                                        UpperRelationKind stage,
+                                        RelOptInfo *input_rel,
+                                        RelOptInfo *output_rel,
+                                        void *extra);
 extern void parquetInitializeWorkerForeignScan(ForeignScanState *node,
                                                shm_toc *toc,
                                                void *coordinate);
@@ -147,6 +152,7 @@ parquet_fdw_handler(PG_FUNCTION_ARGS)
     fdwroutine->InitializeWorkerForeignScan = parquetInitializeWorkerForeignScan;
     fdwroutine->ShutdownForeignScan = parquetShutdownForeignScan;
     fdwroutine->ImportForeignSchema = parquetImportForeignSchema;
+    fdwroutine->GetForeignUpperPaths = parquetGetForeignUpperPaths;
 
     PG_RETURN_POINTER(fdwroutine);
 }

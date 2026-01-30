@@ -232,6 +232,8 @@ DEBUG:  parquet_fdw: adding globbed filename @abs_srcdir@/data/simple/example1.p
 
 SELECT * FROM example1 WHERE three LIKE 'z%';  -- should skip row groups where max < 'z'
 DEBUG:  parquet_fdw: adding globbed filename @abs_srcdir@/data/simple/example1.parquet to list of files
+DEBUG:  parquet_fdw: skip rowgroup 1 in @abs_srcdir@/data/simple/example1.parquet (stats)
+DEBUG:  parquet_fdw: skip rowgroup 2 in @abs_srcdir@/data/simple/example1.parquet (stats)
  one | two | three | four | five | six | seven 
 -----+-----+-------+------+------+-----+-------
 (0 rows)
