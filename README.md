@@ -549,6 +549,33 @@ SELECT pg_reload_conf();
 - The `allowed_directories` setting requires superuser privileges to modify.
 - Paths returned by `files_func` are also validated against allowed directories.
 
+## Query Planning and Statistics
+
+### Automatic Statistics from Parquet Metadata
+
+The FDW automatically extracts row count statistics from Parquet file metadata during query planning. This provides accurate row estimates to PostgreSQL's query planner without requiring `ANALYZE`.
+
+**How it works:**
+1. During planning, the FDW reads metadata from each Parquet file
+2. Row group min/max statistics are used to prune row groups that don't match query filters
+3. The actual row count from matching row groups is used for cost estimation
+
+This enables PostgreSQL to choose optimal join strategies (hash join vs nested loop) and parallel query plans based on actual data sizes.
+
+### When to Run ANALYZE
+
+While automatic statistics provide good row estimates, running `ANALYZE` can improve query plans by providing:
+- Column value histograms for selectivity estimation
+- Most common values for equality filters
+- Correlation statistics for index scans
+
+```sql
+-- Analyze a foreign table for additional statistics
+ANALYZE my_parquet_table;
+```
+
+For large tables with complex queries, running `ANALYZE` periodically can improve query performance.
+
 ## Configuration
 
 ### GUC Variables

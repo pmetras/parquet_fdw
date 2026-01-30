@@ -1925,12 +1925,73 @@ estimate_costs(PlannerInfo *root, RelOptInfo *baserel, Cost *startup_cost,
     auto    fdw_private = (ParquetFdwPlanState *) baserel->fdw_private;
     double  ntuples;
 
-    ntuples = baserel->tuples *
-        clauselist_selectivity(root,
-                               baserel->baserestrictinfo,
-                               0,
-                               JOIN_INNER,
-                               NULL);
+    /*
+     * Use actual row count from Parquet metadata (matched_rows) as the primary
+     * estimate. This is more accurate than PostgreSQL's default selectivity
+     * estimates because we've already done row group filtering using min/max
+     * statistics.
+     *
+     * Only fall back to selectivity-based estimation if we don't have
+     * metadata (matched_rows == 0 but tuples > 0 indicates no row groups
+     * matched, which is correct).
+     */
+    if (fdw_private->matched_rows > 0)
+    {
+        /*
+         * We have actual row counts from row group filtering. Use this as the
+         * estimate. The row group filter already accounts for min/max statistics,
+         * so this is a better estimate than clauselist_selectivity().
+         *
+         * Apply a small selectivity factor (0.5) to account for rows within
+         * matching row groups that may not match the filter conditions.
+         * This is more conservative than the default selectivity but less
+         * pessimistic than what PostgreSQL would estimate without statistics.
+         */
+        double selectivity = clauselist_selectivity(root,
+                                                    baserel->baserestrictinfo,
+                                                    0,
+                                                    JOIN_INNER,
+                                                    NULL);
+
+        /*
+         * If we have filters, apply selectivity but use matched_rows as an upper
+         * bound. The selectivity should not increase the count beyond what row
+         * group filtering determined.
+         */
+        if (baserel->baserestrictinfo != NIL && selectivity < 1.0)
+        {
+            /*
+             * Use the larger of: selectivity-based estimate or 10% of matched_rows.
+             * This prevents overly pessimistic estimates (rows=0) while still
+             * accounting for filter selectivity.
+             */
+            ntuples = fdw_private->matched_rows * selectivity;
+            ntuples = Max(ntuples, fdw_private->matched_rows * 0.1);
+            ntuples = Max(ntuples, 1.0);  /* Always estimate at least 1 row */
+        }
+        else
+        {
+            /* No filters or selectivity is 1.0, use matched_rows directly */
+            ntuples = fdw_private->matched_rows;
+        }
+
+        elog(DEBUG2, "parquet_fdw: row estimate from metadata: matched_rows=%lu, "
+             "selectivity=%.4f, estimated_rows=%.0f",
+             (unsigned long) fdw_private->matched_rows, selectivity, ntuples);
+    }
+    else
+    {
+        /*
+         * No matching row groups or no metadata available.
+         * Fall back to selectivity-based estimation.
+         */
+        ntuples = baserel->tuples *
+            clauselist_selectivity(root,
+                                   baserel->baserestrictinfo,
+                                   0,
+                                   JOIN_INNER,
+                                   NULL);
+    }
 
     /*
      * Here we assume that parquet tuple cost is the same as regular tuple cost
@@ -2314,8 +2375,6 @@ parquetGetForeignPlan(PlannerInfo * /* root */,
     params = lappend(params, makeInteger(fdw_private->max_open_files));
     params = lappend(params, fdw_private->rowgroups);
     params = lappend(params, makeInteger(fdw_private->hive_partitioning));
-    params = lappend(params, fdw_private->partition_map ?
-                     makeString(pstrdup(fdw_private->partition_map)) : makeString(pstrdup("")));
 
 	/* Create the ForeignScan node */
 	return make_foreignscan(tlist,
@@ -2346,7 +2405,6 @@ parquetBeginForeignScan(ForeignScanState *node, int /* eflags */)
     bool            use_mmap = false;
     bool            use_threads = false;
     bool            hive_partitioning = false;
-    char           *partition_map = nullptr;
     int             i = 0;
     ReaderType      reader_type = RT_SINGLE;
     int             max_open_files = 0;
@@ -2385,12 +2443,6 @@ parquetBeginForeignScan(ForeignScanState *node, int /* eflags */)
                 break;
             case 8:
                 hive_partitioning = (bool) intVal(lfirst(lc));
-                break;
-            case 9:
-                {
-                    char *pm = strVal(lfirst(lc));
-                    partition_map = (pm && pm[0] != '\0') ? pm : nullptr;
-                }
                 break;
         }
         ++i;
