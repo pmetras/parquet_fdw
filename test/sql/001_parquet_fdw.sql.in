@@ -59,6 +59,10 @@ SELECT * FROM example1 WHERE three IN ('foo', 'bar');
 SELECT * FROM example1 WHERE three LIKE 'fo%';
 SELECT * FROM example1 WHERE three LIKE 'z%';  -- should skip row groups where max < 'z'
 
+-- Not equal filtering (can only skip if min == max == excluded value)
+SELECT * FROM example1 WHERE one != 1;  -- some rows match, can't skip any row group
+SELECT * FROM example1 WHERE one != 10;  -- all rows match (10 not in data)
+
 -- prepared statements
 prepare prep(date) as select * from example1 where five < $1;
 execute prep('2018-01-03');

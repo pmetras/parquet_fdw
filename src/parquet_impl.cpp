@@ -102,6 +102,12 @@ extern "C"
 #define CREATE_FOREIGNSCAN_DISABLED_NODES
 #endif
 
+/*
+ * Custom strategy number for not-equal operator.
+ * BTNotEqualStrategyNumber is not a standard btree strategy, so we define our own.
+ * We use 6 since BTMaxStrategyNumber is 5.
+ */
+#define ROWGROUP_NOTEQUAL_STRATEGY  6
 
 bool enable_multifile;
 bool enable_multifile_merge;
@@ -649,6 +655,23 @@ extract_rowgroup_filters(List *scan_clauses,
                             pfree(pattern_str);
                         }
                     }
+
+                    /*
+                     * Check if it's a not-equal operator (negator of =).
+                     * We can skip row groups where min == max == excluded value.
+                     */
+                    Oid negator = get_negator(opno);
+                    if (OidIsValid(negator))
+                    {
+                        int neg_strategy = get_strategy(v->vartype, negator, BTREE_AM_OID);
+                        if (neg_strategy == BTEqualStrategyNumber)
+                        {
+                            /* This is a != operator, use custom strategy */
+                            strategy = ROWGROUP_NOTEQUAL_STRATEGY;
+                            goto add_filter;
+                        }
+                    }
+
                     continue;
                 }
                 is_key = true;
@@ -824,6 +847,7 @@ extract_rowgroup_filters(List *scan_clauses,
         else
             continue;
 
+add_filter:
         RowGroupFilter f
         {
             .attnum = v->varattno,
@@ -1174,6 +1198,36 @@ row_group_matches_filter(parquet::Statistics *stats,
                 if (l < 0 || u > 0)
                     return false;
                 break;
+            }
+
+        case ROWGROUP_NOTEQUAL_STRATEGY:
+            {
+                /*
+                 * For != (not equal), we can only skip a row group if ALL values
+                 * in that row group equal the excluded value. This happens when
+                 * min == max == value (the entire row group is constant).
+                 */
+                Datum   lower,
+                        upper;
+                std::string min = stats->EncodeMin();
+                std::string max = stats->EncodeMax();
+
+                lower = bytes_to_postgres_type(min.c_str(), min.length(),
+                                               arrow_type);
+                upper = bytes_to_postgres_type(max.c_str(), max.length(),
+                                               arrow_type);
+
+                /* Check if min == max (row group has constant value) */
+                int min_max_cmp = FunctionCall2Coll(&finfo, collid, lower, upper);
+                if (min_max_cmp != 0)
+                    return true;  /* Values vary, some might not equal excluded value */
+
+                /* min == max, check if they equal the excluded value */
+                int val_cmp = FunctionCall2Coll(&finfo, collid, val, lower);
+                if (val_cmp == 0)
+                    return false;  /* All values equal excluded value, skip row group */
+
+                return true;  /* All values are the same but != excluded value */
             }
 
         default:

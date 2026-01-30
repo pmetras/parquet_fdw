@@ -238,6 +238,30 @@ DEBUG:  parquet_fdw: skip rowgroup 2 in @abs_srcdir@/data/simple/example1.parque
 -----+-----+-------+------+------+-----+-------
 (0 rows)
 
+-- Not equal filtering (can only skip if min == max == excluded value)
+SELECT * FROM example1 WHERE one != 1;  -- some rows match, can't skip any row group
+DEBUG:  parquet_fdw: adding globbed filename @abs_srcdir@/data/simple/example1.parquet to list of files
+ one |    two     | three |           four            |    five    | six | seven 
+-----+------------+-------+---------------------------+------------+-----+-------
+   2 | {NULL,5,6} | bar   | 2018-01-02 00:00:00       | 2018-01-02 | f   |      
+   3 | {7,8,9}    | baz   | 2018-01-03 00:00:00       | 2018-01-03 | t   |     1
+   4 | {10,11,12} | uno   | 2018-01-04 00:00:10       | 2018-01-04 | f   |   1.5
+   5 | {13,14,15} | dos   | 2018-01-05 00:00:00.01    | 2018-01-05 | f   |      
+   6 | {16,17,18} | tres  | 2018-01-06 00:00:00.00001 | 2018-01-06 | f   |     2
+(5 rows)
+
+SELECT * FROM example1 WHERE one != 10;  -- all rows match (10 not in data)
+DEBUG:  parquet_fdw: adding globbed filename @abs_srcdir@/data/simple/example1.parquet to list of files
+ one |    two     | three |           four            |    five    | six | seven 
+-----+------------+-------+---------------------------+------------+-----+-------
+   1 | {1,2,3}    | foo   | 2018-01-01 00:00:00       | 2018-01-01 | t   |   0.5
+   2 | {NULL,5,6} | bar   | 2018-01-02 00:00:00       | 2018-01-02 | f   |      
+   3 | {7,8,9}    | baz   | 2018-01-03 00:00:00       | 2018-01-03 | t   |     1
+   4 | {10,11,12} | uno   | 2018-01-04 00:00:10       | 2018-01-04 | f   |   1.5
+   5 | {13,14,15} | dos   | 2018-01-05 00:00:00.01    | 2018-01-05 | f   |      
+   6 | {16,17,18} | tres  | 2018-01-06 00:00:00.00001 | 2018-01-06 | f   |     2
+(6 rows)
+
 -- prepared statements
 prepare prep(date) as select * from example1 where five < $1;
 execute prep('2018-01-03');
