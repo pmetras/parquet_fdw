@@ -250,5 +250,59 @@ SELECT id, uuid_col FROM example_uuid WHERE name = 'first';
 
 SET client_min_messages = WARNING;
 
+-- Dictionary filtering tests
+-- Test data has 3 row groups with different dictionary contents:
+--   RG1: int32_dict={100,200,300}, int64_dict={1M,2M,3M}, string_dict={alpha,beta,gamma}
+--   RG2: int32_dict={400,500,600}, int64_dict={4M,5M,6M}, string_dict={delta,epsilon,zeta}
+--   RG3: int32_dict={100,700,800}, int64_dict={1M,7M,8M}, string_dict={alpha,eta,theta}
+-- Dictionary filtering only triggers when value is within min/max range but not in dictionary.
+SET client_min_messages = DEBUG1;
+
+CREATE FOREIGN TABLE example_dict (
+    id          INT4,
+    int32_dict  INT8,
+    int64_dict  INT8,
+    string_dict TEXT)
+SERVER parquet_srv
+OPTIONS (filename '@abs_srcdir@/data/simple/example_dict.parquet');
+
+-- INT64: value in RG1 only, within RG3 range but not in RG3's dict
+-- RG1: 1M-3M (contains 2M) -> read
+-- RG2: 4M-6M (2M < 4M) -> skip by stats
+-- RG3: 1M-8M (contains range but 2M not in dict {1M,7M,8M}) -> skip by dict
+SELECT * FROM example_dict WHERE int64_dict = 2000000;
+
+-- INT64: value in RG2 only
+-- RG1: 1M-3M (5M > 3M) -> skip by stats
+-- RG2: 4M-6M (contains 5M) -> read
+-- RG3: 1M-8M (contains range but 5M not in dict {1M,7M,8M}) -> skip by dict
+SELECT * FROM example_dict WHERE int64_dict = 5000000;
+
+-- INT64: value in RG1 and RG3 (same value 1M in both dicts)
+-- RG1: 1M-3M (contains 1M) -> read
+-- RG2: 4M-6M (1M < 4M) -> skip by stats
+-- RG3: 1M-8M (contains 1M in dict) -> read
+SELECT * FROM example_dict WHERE int64_dict = 1000000;
+
+-- STRING: value in RG2 only
+-- RG1: alpha-gamma ('epsilon' > 'gamma') -> skip by stats
+-- RG2: delta-zeta (contains 'epsilon') -> read
+-- RG3: alpha-theta ('epsilon' is in range, not in dict {alpha,eta,theta}) -> skip by dict
+SELECT * FROM example_dict WHERE string_dict = 'epsilon';
+
+-- STRING: value in RG1 and RG3 (same value 'alpha')
+-- RG1: alpha-gamma (contains 'alpha') -> read
+-- RG2: delta-zeta ('alpha' < 'delta') -> skip by stats
+-- RG3: alpha-theta (contains 'alpha') -> read
+SELECT * FROM example_dict WHERE string_dict = 'alpha';
+
+-- STRING: value not in any dictionary but within all ranges (should be skipped by dict)
+-- RG1: alpha-gamma (contains 'foo') -> skip by dict (foo not in {alpha,beta,gamma})
+-- RG2: delta-zeta (contains 'foo') -> skip by dict (foo not in {delta,epsilon,zeta})
+-- RG3: alpha-theta (contains 'foo') -> skip by dict (foo not in {alpha,eta,theta})
+SELECT * FROM example_dict WHERE string_dict = 'foo';
+
+SET client_min_messages = WARNING;
+
 DROP OWNED by regress_parquet_fdw;
 DROP EXTENSION parquet_fdw CASCADE;

@@ -520,3 +520,53 @@ for category, data in null_partition_data:
         writer.write_table(table)
 
 print("Generated NULL partition test data in hive/null_partition/")
+
+# =============================================================================
+# Dictionary filtering test data
+# =============================================================================
+# Creates file with dictionary-encoded columns for testing row group pruning.
+# Each row group has different dictionary contents.
+# Note: We use plain schema (not dictionary type) to match how parquet_fdw reads data,
+# but Parquet will still use dictionary encoding at the page level (default behavior).
+
+# Row group 1: ids 1-3, dictionaries contain {100,200,300}, {1M,2M,3M}, {alpha,beta,gamma}
+# Row group 2: ids 4-6, dictionaries contain {400,500,600}, {4M,5M,6M}, {delta,epsilon,zeta}
+# Row group 3: ids 7-9, dictionaries contain {100,700,800}, {1M,7M,8M}, {alpha,eta,theta}
+#   (100, 1M, alpha repeated from RG1 to test cross-group filtering)
+
+dict_schema = pa.schema([
+    pa.field('id', pa.int32()),
+    pa.field('int32_dict', pa.int64()),
+    pa.field('int64_dict', pa.int64()),
+    pa.field('string_dict', pa.string()),
+])
+
+dict_rg1 = pa.table({
+    'id': pa.array([1, 2, 3], type=pa.int32()),
+    'int32_dict': pa.array([100, 200, 300], type=pa.int64()),
+    'int64_dict': pa.array([1000000, 2000000, 3000000], type=pa.int64()),
+    'string_dict': pa.array(['alpha', 'beta', 'gamma']),
+})
+
+dict_rg2 = pa.table({
+    'id': pa.array([4, 5, 6], type=pa.int32()),
+    'int32_dict': pa.array([400, 500, 600], type=pa.int64()),
+    'int64_dict': pa.array([4000000, 5000000, 6000000], type=pa.int64()),
+    'string_dict': pa.array(['delta', 'epsilon', 'zeta']),
+})
+
+dict_rg3 = pa.table({
+    'id': pa.array([7, 8, 9], type=pa.int32()),
+    'int32_dict': pa.array([100, 700, 800], type=pa.int64()),
+    'int64_dict': pa.array([1000000, 7000000, 8000000], type=pa.int64()),
+    'string_dict': pa.array(['alpha', 'eta', 'theta']),
+})
+
+# use_dictionary=True ensures dictionary encoding at page level
+with pq.ParquetWriter('simple/example_dict.parquet', dict_schema,
+                      use_dictionary=True) as writer:
+    writer.write_table(dict_rg1)
+    writer.write_table(dict_rg2)
+    writer.write_table(dict_rg3)
+
+print("Generated dictionary filtering test data in simple/example_dict.parquet")
