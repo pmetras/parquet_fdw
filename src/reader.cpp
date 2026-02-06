@@ -406,6 +406,44 @@ Datum ParquetReader::read_primitive_type(arrow::Array *array,
             res = Int64GetDatum(value);
             break;
         }
+        case arrow::Type::UINT8:
+        {
+            auto *intarray = static_cast<arrow::UInt8Array *>(array);
+            int16 value = (int16) intarray->Value(i);
+
+            res = Int16GetDatum(value);
+            break;
+        }
+        case arrow::Type::UINT16:
+        {
+            auto *intarray = static_cast<arrow::UInt16Array *>(array);
+            int32 value = (int32) intarray->Value(i);
+
+            res = Int32GetDatum(value);
+            break;
+        }
+        case arrow::Type::UINT32:
+        {
+            auto *intarray = static_cast<arrow::UInt32Array *>(array);
+            int64 value = (int64) intarray->Value(i);
+
+            res = Int64GetDatum(value);
+            break;
+        }
+        case arrow::Type::UINT64:
+        {
+            auto *intarray = static_cast<arrow::UInt64Array *>(array);
+            uint64 value = intarray->Value(i);
+            char buf[32];
+
+            snprintf(buf, sizeof(buf), "%llu", (unsigned long long) value);
+            char *cval = pstrdup(buf);
+            res = DirectFunctionCall3(numeric_in,
+                                      CStringGetDatum(cval),
+                                      ObjectIdGetDatum(InvalidOid),
+                                      Int32GetDatum(-1));
+            break;
+        }
         case arrow::Type::FLOAT:
         {
             auto *farray = static_cast<arrow::FloatArray *>(array);
@@ -673,7 +711,9 @@ Datum ParquetReader::nested_list_to_datum(arrow::ListArray *larray, int pos,
 
 #if SIZEOF_DATUM == 8
     /* Fill values and nulls arrays */
-    if (array->null_count() == 0 && typinfo.arrow.type_id == arrow::Type::INT64)
+    if (array->null_count() == 0 &&
+        (typinfo.arrow.type_id == arrow::Type::INT64 ||
+         typinfo.arrow.type_id == arrow::Type::UINT32))
     {
         /*
          * Ok, there are no nulls, so probably we could just memcpy the
@@ -1393,11 +1433,20 @@ public:
             case arrow::Type::INT8:
                 sz = sizeof(int8);
                 break;
+            case arrow::Type::UINT8:
+                sz = sizeof(uint8);
+                break;
             case arrow::Type::INT16:
                 sz = sizeof(int16);
                 break;
+            case arrow::Type::UINT16:
+                sz = sizeof(uint16);
+                break;
             case arrow::Type::INT32:
                 sz = sizeof(int32);
+                break;
+            case arrow::Type::UINT32:
+                sz = sizeof(uint32);
                 break;
             case arrow::Type::FLOAT:
                 sz = sizeof(float);
@@ -1465,6 +1514,24 @@ public:
                         {
                             auto *tsarray = static_cast<arrow::Date32Array *>(array);
                             static_cast<int *>(data)[row] = tsarray->Value(row);
+                            break;
+                        }
+                    case arrow::Type::UINT8:
+                        {
+                            auto *intarray = static_cast<arrow::UInt8Array *>(array);
+                            static_cast<uint8 *>(data)[row] = intarray->Value(row);
+                            break;
+                        }
+                    case arrow::Type::UINT16:
+                        {
+                            auto *intarray = static_cast<arrow::UInt16Array *>(array);
+                            static_cast<uint16 *>(data)[row] = intarray->Value(row);
+                            break;
+                        }
+                    case arrow::Type::UINT32:
+                        {
+                            auto *intarray = static_cast<arrow::UInt32Array *>(array);
+                            static_cast<uint32 *>(data)[row] = intarray->Value(row);
                             break;
                         }
 
@@ -1570,6 +1637,15 @@ public:
                         break;
                     case arrow::Type::FLOAT:
                         slot->tts_values[attr] = Float4GetDatum(static_cast<float *>(data)[this->row]);
+                        break;
+                    case arrow::Type::UINT8:
+                        slot->tts_values[attr] = Int16GetDatum((int16) static_cast<uint8 *>(data)[this->row]);
+                        break;
+                    case arrow::Type::UINT16:
+                        slot->tts_values[attr] = Int32GetDatum((int32) static_cast<uint16 *>(data)[this->row]);
+                        break;
+                    case arrow::Type::UINT32:
+                        slot->tts_values[attr] = Int64GetDatum((int64) static_cast<uint32 *>(data)[this->row]);
                         break;
                     case arrow::Type::DATE32:
                         {

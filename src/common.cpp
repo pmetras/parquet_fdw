@@ -126,10 +126,13 @@ to_postgres_type(const arrow::DataType *arrow_type)
             return BOOLOID;
         case arrow::Type::INT8:
         case arrow::Type::INT16:
+        case arrow::Type::UINT8:
             return INT2OID;
         case arrow::Type::INT32:
+        case arrow::Type::UINT16:
             return INT4OID;
         case arrow::Type::INT64:
+        case arrow::Type::UINT32:
             return INT8OID;
         case arrow::Type::FLOAT:
             return FLOAT4OID;
@@ -145,6 +148,7 @@ to_postgres_type(const arrow::DataType *arrow_type)
             return TIMEOID;
         case arrow::Type::DATE32:
             return DATEOID;
+        case arrow::Type::UINT64:
         case arrow::Type::DECIMAL128:
         case arrow::Type::DECIMAL256:
             return NUMERICOID;
@@ -179,10 +183,26 @@ bytes_to_postgres_type(const char *bytes, Size len, const arrow::DataType *arrow
             return Int16GetDatum(*(int8 *) bytes);
         case arrow::Type::INT16:
             return Int16GetDatum(*(int16 *) bytes);
+        case arrow::Type::UINT8:
+            return Int16GetDatum((int16)(*(uint8 *) bytes));
         case arrow::Type::INT32:
             return Int32GetDatum(*(int32 *) bytes);
+        case arrow::Type::UINT16:
+            return Int32GetDatum((int32)(*(uint16 *) bytes));
         case arrow::Type::INT64:
             return Int64GetDatum(*(int64 *) bytes);
+        case arrow::Type::UINT32:
+            return Int64GetDatum((int64)(*(uint32 *) bytes));
+        case arrow::Type::UINT64:
+            {
+                char    buf[32];
+                snprintf(buf, sizeof(buf), "%llu",
+                         (unsigned long long)(*(uint64 *) bytes));
+                return DirectFunctionCall3(numeric_in,
+                                           CStringGetDatum(buf),
+                                           ObjectIdGetDatum(InvalidOid),
+                                           Int32GetDatum(-1));
+            }
         case arrow::Type::FLOAT:
             return Float4GetDatum(*(float *) bytes);
         case arrow::Type::DOUBLE:

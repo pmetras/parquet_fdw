@@ -1002,6 +1002,10 @@ arrow_type_supports_statistics(const arrow::DataType *arrow_type)
         case arrow::Type::INT16:
         case arrow::Type::INT32:
         case arrow::Type::INT64:
+        case arrow::Type::UINT8:
+        case arrow::Type::UINT16:
+        case arrow::Type::UINT32:
+        case arrow::Type::UINT64:
         case arrow::Type::FLOAT:
         case arrow::Type::DOUBLE:
         case arrow::Type::STRING:
@@ -1292,6 +1296,8 @@ bloom_filter_hash_value(parquet::BloomFilter *bloom_filter,
         case arrow::Type::INT8:
         case arrow::Type::INT16:
         case arrow::Type::INT32:
+        case arrow::Type::UINT8:
+        case arrow::Type::UINT16:
             {
                 int32_t v = DatumGetInt32(val);
                 *hash_out = bloom_filter->Hash(v);
@@ -1299,6 +1305,7 @@ bloom_filter_hash_value(parquet::BloomFilter *bloom_filter,
             }
 
         case arrow::Type::INT64:
+        case arrow::Type::UINT32:
             {
                 int64_t v = DatumGetInt64(val);
                 *hash_out = bloom_filter->Hash(v);
@@ -1454,6 +1461,18 @@ row_group_matches_dictionary(parquet::ParquetFileReader *parquet_reader,
             {
                 const int64_t *dict = reinterpret_cast<const int64_t*>(dict_data);
                 int64_t search_val = DatumGetInt64(filter_val);
+                for (int32_t i = 0; i < num_values; i++)
+                {
+                    if (dict[i] == search_val)
+                        return true;
+                }
+                return false;
+            }
+
+            case arrow::Type::UINT32:
+            {
+                const uint32_t *dict = reinterpret_cast<const uint32_t*>(dict_data);
+                uint32_t search_val = (uint32_t) DatumGetInt64(filter_val);
                 for (int32_t i = 0; i < num_values; i++)
                 {
                     if (dict[i] == search_val)
