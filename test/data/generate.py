@@ -570,3 +570,44 @@ with pq.ParquetWriter('simple/example_dict.parquet', dict_schema,
     writer.write_table(dict_rg3)
 
 print("Generated dictionary filtering test data in simple/example_dict.parquet")
+
+# =============================================================================
+# Unsigned integer type test data
+# =============================================================================
+# Two row groups to test min/max statistics filtering.
+# Row group 1: low values (including 0 and typical values)
+# Row group 2: high/max values (including type maximums)
+# Includes NULLs to test null handling.
+
+uint_schema = pa.schema([
+    pa.field('id', pa.int32()),
+    pa.field('u8', pa.uint8()),
+    pa.field('u16', pa.uint16()),
+    pa.field('u32', pa.uint32()),
+    pa.field('u64', pa.uint64()),
+])
+
+# Row group 1: low values
+uint_rg1 = pa.table({
+    'id':  pa.array([1, 2, 3, 4],    type=pa.int32()),
+    'u8':  pa.array([0, 1, 127, None], type=pa.uint8()),
+    'u16': pa.array([0, 1, 32767, None], type=pa.uint16()),
+    'u32': pa.array([0, 1, 2147483647, None], type=pa.uint32()),
+    'u64': pa.array([0, 1, 9223372036854775807, None], type=pa.uint64()),
+})
+
+# Row group 2: high/max values
+uint_rg2 = pa.table({
+    'id':  pa.array([5, 6, 7, 8],    type=pa.int32()),
+    'u8':  pa.array([128, 254, 255, None], type=pa.uint8()),
+    'u16': pa.array([32768, 65534, 65535, None], type=pa.uint16()),
+    'u32': pa.array([2147483648, 4294967294, 4294967295, None], type=pa.uint32()),
+    'u64': pa.array([9223372036854775808, 18446744073709551614, 18446744073709551615, None], type=pa.uint64()),
+})
+
+with pq.ParquetWriter('simple/example_unsigned.parquet', uint_schema,
+                      use_dictionary=True) as writer:
+    writer.write_table(uint_rg1)
+    writer.write_table(uint_rg2)
+
+print("Generated unsigned integer test data in simple/example_unsigned.parquet")

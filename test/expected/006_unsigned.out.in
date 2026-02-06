@@ -1,0 +1,197 @@
+-- Unsigned integer type tests (UINT8, UINT16, UINT32, UINT64)
+SET datestyle = 'ISO';
+SET client_min_messages = WARNING;
+SET log_statement TO 'none';
+-- Clean up any leftover objects from previous test runs
+DROP EXTENSION IF EXISTS parquet_fdw CASCADE;
+DROP ROLE IF EXISTS regress_parquet_fdw;
+-- Create fresh objects
+CREATE EXTENSION parquet_fdw;
+CREATE ROLE regress_parquet_fdw LOGIN SUPERUSER;
+CREATE SERVER parquet_srv FOREIGN DATA WRAPPER parquet_fdw;
+CREATE USER MAPPING FOR regress_parquet_fdw SERVER parquet_srv;
+SET ROLE regress_parquet_fdw;
+-- Create foreign table mapping unsigned types to appropriate PG types
+CREATE FOREIGN TABLE unsigned_test (
+    id    INT,
+    u8    SMALLINT,            -- UINT8 -> INT2
+    u16   INTEGER,             -- UINT16 -> INT4
+    u32   BIGINT,              -- UINT32 -> INT8
+    u64   NUMERIC              -- UINT64 -> NUMERIC
+)
+SERVER parquet_srv
+OPTIONS (filename '@abs_srcdir@/data/simple/example_unsigned.parquet');
+-- Test 1: Read all data (both row groups)
+SELECT * FROM unsigned_test ORDER BY id;
+ id | u8  |  u16  |    u32     |         u64          
+----+-----+-------+------------+----------------------
+  1 |   0 |     0 |          0 |                    0
+  2 |   1 |     1 |          1 |                    1
+  3 | 127 | 32767 | 2147483647 |  9223372036854775807
+  4 |     |       |            |                     
+  5 | 128 | 32768 | 2147483648 |  9223372036854775808
+  6 | 254 | 65534 | 4294967294 | 18446744073709551614
+  7 | 255 | 65535 | 4294967295 | 18446744073709551615
+  8 |     |       |            |                     
+(8 rows)
+
+-- Test 2: Check NULLs are handled correctly
+SELECT id, u8, u16, u32, u64 FROM unsigned_test WHERE u8 IS NULL ORDER BY id;
+ id | u8 | u16 | u32 | u64 
+----+----+-----+-----+-----
+  4 |    |     |     |    
+  8 |    |     |     |    
+(2 rows)
+
+SELECT id, u8, u16, u32, u64 FROM unsigned_test WHERE u8 IS NOT NULL ORDER BY id;
+ id | u8  |  u16  |    u32     |         u64          
+----+-----+-------+------------+----------------------
+  1 |   0 |     0 |          0 |                    0
+  2 |   1 |     1 |          1 |                    1
+  3 | 127 | 32767 | 2147483647 |  9223372036854775807
+  5 | 128 | 32768 | 2147483648 |  9223372036854775808
+  6 | 254 | 65534 | 4294967294 | 18446744073709551614
+  7 | 255 | 65535 | 4294967295 | 18446744073709551615
+(6 rows)
+
+-- Test 3: Edge case - zero values
+SELECT * FROM unsigned_test WHERE u8 = 0;
+ id | u8 | u16 | u32 | u64 
+----+----+-----+-----+-----
+  1 |  0 |   0 |   0 |   0
+(1 row)
+
+-- Test 4: Edge case - maximum UINT8 (255)
+SELECT id, u8 FROM unsigned_test WHERE u8 = 255;
+ id | u8  
+----+-----
+  7 | 255
+(1 row)
+
+-- Test 5: Edge case - maximum UINT16 (65535)
+SELECT id, u16 FROM unsigned_test WHERE u16 = 65535;
+ id |  u16  
+----+-------
+  7 | 65535
+(1 row)
+
+-- Test 6: Edge case - maximum UINT32 (4294967295)
+SELECT id, u32 FROM unsigned_test WHERE u32 = 4294967295;
+ id |    u32     
+----+------------
+  7 | 4294967295
+(1 row)
+
+-- Test 7: Edge case - maximum UINT64 (18446744073709551615)
+SELECT id, u64 FROM unsigned_test WHERE u64 = 18446744073709551615;
+ id |         u64          
+----+----------------------
+  7 | 18446744073709551615
+(1 row)
+
+-- Test 8: Values at signed/unsigned boundary (e.g., UINT8 > 127, UINT16 > 32767)
+SELECT id, u8 FROM unsigned_test WHERE u8 > 127 ORDER BY id;
+ id | u8  
+----+-----
+  5 | 128
+  6 | 254
+  7 | 255
+(3 rows)
+
+SELECT id, u16 FROM unsigned_test WHERE u16 > 32767 ORDER BY id;
+ id |  u16  
+----+-------
+  5 | 32768
+  6 | 65534
+  7 | 65535
+(3 rows)
+
+SELECT id, u32 FROM unsigned_test WHERE u32 > 2147483647 ORDER BY id;
+ id |    u32     
+----+------------
+  5 | 2147483648
+  6 | 4294967294
+  7 | 4294967295
+(3 rows)
+
+SELECT id, u64 FROM unsigned_test WHERE u64 > 9223372036854775807 ORDER BY id;
+ id |         u64          
+----+----------------------
+  5 |  9223372036854775808
+  6 | 18446744073709551614
+  7 | 18446744073709551615
+(3 rows)
+
+-- Test 9: Range filter spanning both row groups
+SELECT id, u8 FROM unsigned_test WHERE u8 BETWEEN 100 AND 200 ORDER BY id;
+ id | u8  
+----+-----
+  3 | 127
+  5 | 128
+(2 rows)
+
+SELECT id, u32 FROM unsigned_test WHERE u32 BETWEEN 1 AND 2147483648 ORDER BY id;
+ id |    u32     
+----+------------
+  2 |          1
+  3 | 2147483647
+  5 | 2147483648
+(3 rows)
+
+-- Test 10: Aggregates
+SELECT MIN(u8), MAX(u8), SUM(u8::int) FROM unsigned_test;
+ min | max | sum 
+-----+-----+-----
+   0 | 255 | 765
+(1 row)
+
+SELECT MIN(u16), MAX(u16), SUM(u16::bigint) FROM unsigned_test;
+ min |  max  |  sum   
+-----+-------+--------
+   0 | 65535 | 196605
+(1 row)
+
+SELECT MIN(u32), MAX(u32), SUM(u32::numeric) FROM unsigned_test;
+ min |    max     |     sum     
+-----+------------+-------------
+   0 | 4294967295 | 12884901885
+(1 row)
+
+SELECT MIN(u64), MAX(u64), SUM(u64) FROM unsigned_test;
+ min |         max          |         sum          
+-----+----------------------+----------------------
+   0 | 18446744073709551615 | 55340232221128654845
+(1 row)
+
+-- Test 11: Arithmetic - verify no overflow in PG types
+SELECT id, u8 + 1 as u8_plus, u16 + 1 as u16_plus, u32 + 1 as u32_plus, u64 + 1 as u64_plus
+FROM unsigned_test WHERE id = 7 ORDER BY id;
+ id | u8_plus | u16_plus |  u32_plus  |       u64_plus       
+----+---------+----------+------------+----------------------
+  7 |     256 |    65536 | 4294967296 | 18446744073709551616
+(1 row)
+
+-- Test 12: Comparison between unsigned columns
+SELECT id, u8, u16 FROM unsigned_test WHERE u8::int = u16 AND u8 IS NOT NULL ORDER BY id;
+ id | u8 | u16 
+----+----+-----
+  1 |  0 |   0
+  2 |  1 |   1
+(2 rows)
+
+-- Test 13: IN list filter
+SELECT id, u8 FROM unsigned_test WHERE u8 IN (0, 127, 255) ORDER BY id;
+ id | u8  
+----+-----
+  1 |   0
+  3 | 127
+  7 | 255
+(3 rows)
+
+-- Clean up
+DROP FOREIGN TABLE unsigned_test;
+DROP USER MAPPING FOR regress_parquet_fdw SERVER parquet_srv;
+DROP SERVER parquet_srv CASCADE;
+RESET ROLE;
+DROP ROLE regress_parquet_fdw;
+DROP EXTENSION parquet_fdw CASCADE;

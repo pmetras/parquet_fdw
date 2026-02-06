@@ -88,6 +88,10 @@ The following Arrow/Parquet types are mapped to PostgreSQL types:
 | INT16              | INT2                             |
 | INT32              | INT4                             |
 | INT64              | INT8                             |
+| UINT8              | INT2 (smallint, range covers 0–255) |
+| UINT16             | INT4 (integer, range covers 0–65535) |
+| UINT32             | INT8 (bigint, range covers 0–4294967295) |
+| UINT64             | NUMERIC (only type covering 0–18446744073709551615) |
 | FLOAT              | FLOAT4                           |
 | DOUBLE             | FLOAT8                           |
 | TIMESTAMP          | TIMESTAMP                        |
@@ -105,6 +109,11 @@ The following Arrow/Parquet types are mapped to PostgreSQL types:
 **Note:** Structs and nested lists are not currently supported.
 
 ### Type Conversion Details
+
+**Unsigned Integers (UINT8, UINT16, UINT32, UINT64):**
+- Each unsigned type is mapped to the smallest signed PostgreSQL type that can hold its full range without overflow.
+- UINT64 maps to NUMERIC since no fixed-width PostgreSQL integer type can hold values above 9223372036854775807.
+- All row group pruning features (min/max statistics, bloom filters, dictionary filtering) are supported for unsigned types, except bloom filters and dictionary filtering for UINT64 (due to its NUMERIC representation).
 
 **TIME64:**
 - Parquet TIME64 can store values in microsecond or nanosecond resolution.
@@ -605,7 +614,7 @@ The FDW uses multiple techniques to skip row groups that cannot contain matching
 **Dictionary Filtering:**
 - For equality filters (`=`), dictionary-encoded columns can be pruned by checking if the filter value exists in the column's dictionary
 - Useful when bloom filters are not available but the column uses dictionary encoding
-- Supported types: INT32, INT64, STRING
+- Supported types: INT32, INT64, UINT32, STRING
 - If a value is not in the dictionary, the entire row group can be skipped
 
 **Example:** A column with status codes ('pending', 'approved', 'rejected') stored with dictionary encoding can be efficiently filtered without bloom filters. A query `WHERE status = 'unknown'` will skip row groups where 'unknown' is not in the dictionary.

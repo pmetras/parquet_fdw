@@ -1,0 +1,82 @@
+-- Unsigned integer type tests (UINT8, UINT16, UINT32, UINT64)
+SET datestyle = 'ISO';
+SET client_min_messages = WARNING;
+SET log_statement TO 'none';
+
+-- Clean up any leftover objects from previous test runs
+DROP EXTENSION IF EXISTS parquet_fdw CASCADE;
+DROP ROLE IF EXISTS regress_parquet_fdw;
+
+-- Create fresh objects
+CREATE EXTENSION parquet_fdw;
+CREATE ROLE regress_parquet_fdw LOGIN SUPERUSER;
+CREATE SERVER parquet_srv FOREIGN DATA WRAPPER parquet_fdw;
+CREATE USER MAPPING FOR regress_parquet_fdw SERVER parquet_srv;
+SET ROLE regress_parquet_fdw;
+
+-- Create foreign table mapping unsigned types to appropriate PG types
+CREATE FOREIGN TABLE unsigned_test (
+    id    INT,
+    u8    SMALLINT,            -- UINT8 -> INT2
+    u16   INTEGER,             -- UINT16 -> INT4
+    u32   BIGINT,              -- UINT32 -> INT8
+    u64   NUMERIC              -- UINT64 -> NUMERIC
+)
+SERVER parquet_srv
+OPTIONS (filename '@abs_srcdir@/data/simple/example_unsigned.parquet');
+
+-- Test 1: Read all data (both row groups)
+SELECT * FROM unsigned_test ORDER BY id;
+
+-- Test 2: Check NULLs are handled correctly
+SELECT id, u8, u16, u32, u64 FROM unsigned_test WHERE u8 IS NULL ORDER BY id;
+SELECT id, u8, u16, u32, u64 FROM unsigned_test WHERE u8 IS NOT NULL ORDER BY id;
+
+-- Test 3: Edge case - zero values
+SELECT * FROM unsigned_test WHERE u8 = 0;
+
+-- Test 4: Edge case - maximum UINT8 (255)
+SELECT id, u8 FROM unsigned_test WHERE u8 = 255;
+
+-- Test 5: Edge case - maximum UINT16 (65535)
+SELECT id, u16 FROM unsigned_test WHERE u16 = 65535;
+
+-- Test 6: Edge case - maximum UINT32 (4294967295)
+SELECT id, u32 FROM unsigned_test WHERE u32 = 4294967295;
+
+-- Test 7: Edge case - maximum UINT64 (18446744073709551615)
+SELECT id, u64 FROM unsigned_test WHERE u64 = 18446744073709551615;
+
+-- Test 8: Values at signed/unsigned boundary (e.g., UINT8 > 127, UINT16 > 32767)
+SELECT id, u8 FROM unsigned_test WHERE u8 > 127 ORDER BY id;
+SELECT id, u16 FROM unsigned_test WHERE u16 > 32767 ORDER BY id;
+SELECT id, u32 FROM unsigned_test WHERE u32 > 2147483647 ORDER BY id;
+SELECT id, u64 FROM unsigned_test WHERE u64 > 9223372036854775807 ORDER BY id;
+
+-- Test 9: Range filter spanning both row groups
+SELECT id, u8 FROM unsigned_test WHERE u8 BETWEEN 100 AND 200 ORDER BY id;
+SELECT id, u32 FROM unsigned_test WHERE u32 BETWEEN 1 AND 2147483648 ORDER BY id;
+
+-- Test 10: Aggregates
+SELECT MIN(u8), MAX(u8), SUM(u8::int) FROM unsigned_test;
+SELECT MIN(u16), MAX(u16), SUM(u16::bigint) FROM unsigned_test;
+SELECT MIN(u32), MAX(u32), SUM(u32::numeric) FROM unsigned_test;
+SELECT MIN(u64), MAX(u64), SUM(u64) FROM unsigned_test;
+
+-- Test 11: Arithmetic - verify no overflow in PG types
+SELECT id, u8 + 1 as u8_plus, u16 + 1 as u16_plus, u32 + 1 as u32_plus, u64 + 1 as u64_plus
+FROM unsigned_test WHERE id = 7 ORDER BY id;
+
+-- Test 12: Comparison between unsigned columns
+SELECT id, u8, u16 FROM unsigned_test WHERE u8::int = u16 AND u8 IS NOT NULL ORDER BY id;
+
+-- Test 13: IN list filter
+SELECT id, u8 FROM unsigned_test WHERE u8 IN (0, 127, 255) ORDER BY id;
+
+-- Clean up
+DROP FOREIGN TABLE unsigned_test;
+DROP USER MAPPING FOR regress_parquet_fdw SERVER parquet_srv;
+DROP SERVER parquet_srv CASCADE;
+RESET ROLE;
+DROP ROLE regress_parquet_fdw;
+DROP EXTENSION parquet_fdw CASCADE;
