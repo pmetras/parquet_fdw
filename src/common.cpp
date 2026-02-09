@@ -139,8 +139,10 @@ to_postgres_type(const arrow::DataType *arrow_type)
         case arrow::Type::DOUBLE:
             return FLOAT8OID;
         case arrow::Type::STRING:
+        case arrow::Type::LARGE_STRING:
             return TEXTOID;
         case arrow::Type::BINARY:
+        case arrow::Type::LARGE_BINARY:
             return BYTEAOID;
         case arrow::Type::TIMESTAMP:
             return TIMESTAMPOID;
@@ -208,8 +210,10 @@ bytes_to_postgres_type(const char *bytes, Size len, const arrow::DataType *arrow
         case arrow::Type::DOUBLE:
             return Float8GetDatum(*(double *) bytes);
         case arrow::Type::STRING:
+        case arrow::Type::LARGE_STRING:
             return CStringGetTextDatum(bytes);
         case arrow::Type::BINARY:
+        case arrow::Type::LARGE_BINARY:
             return PointerGetDatum(cstring_to_text_with_len(bytes, len));
         case arrow::Type::TIMESTAMP:
             {

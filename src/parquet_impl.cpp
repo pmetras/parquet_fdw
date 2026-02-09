@@ -1009,7 +1009,9 @@ arrow_type_supports_statistics(const arrow::DataType *arrow_type)
         case arrow::Type::FLOAT:
         case arrow::Type::DOUBLE:
         case arrow::Type::STRING:
+        case arrow::Type::LARGE_STRING:
         case arrow::Type::BINARY:
+        case arrow::Type::LARGE_BINARY:
         case arrow::Type::TIMESTAMP:
         case arrow::Type::DATE32:
         case arrow::Type::TIME64:
@@ -1327,7 +1329,9 @@ bloom_filter_hash_value(parquet::BloomFilter *bloom_filter,
             }
 
         case arrow::Type::STRING:
+        case arrow::Type::LARGE_STRING:
         case arrow::Type::BINARY:
+        case arrow::Type::LARGE_BINARY:
             {
                 text *t = DatumGetTextPP(val);
                 parquet::ByteArray ba;
@@ -1482,7 +1486,9 @@ row_group_matches_dictionary(parquet::ParquetFileReader *parquet_reader,
             }
 
             case arrow::Type::STRING:
+            case arrow::Type::LARGE_STRING:
             case arrow::Type::BINARY:
+            case arrow::Type::LARGE_BINARY:
             {
                 /*
                  * String dictionaries use ByteArray format with length-prefixed values.

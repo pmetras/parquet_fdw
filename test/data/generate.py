@@ -5,11 +5,11 @@ import pandas as pd
 import pyarrow as pa
 from datetime import datetime, date, timedelta
 
-# Define explicit schema to avoid large_string (which parquet_fdw doesn't support)
+# Define explicit schema with string (not large_string) for basic tests
 example1_schema = pa.schema([
     pa.field('one', pa.int64()),
     pa.field('two', pa.list_(pa.int64())),
-    pa.field('three', pa.string()),  # Use string, not large_string
+    pa.field('three', pa.string()),
     pa.field('four', pa.timestamp('us')),
     pa.field('five', pa.date32()),
     pa.field('six', pa.bool_()),
@@ -51,7 +51,7 @@ with pq.ParquetWriter('simple/example1.parquet', example1_schema) as writer:
 example2_schema = pa.schema([
     pa.field('one', pa.int64()),
     pa.field('two', pa.list_(pa.int64())),
-    pa.field('three', pa.string()),  # Use string, not large_string
+    pa.field('three', pa.string()),
     pa.field('four', pa.timestamp('us')),
     pa.field('five', pa.date32()),
     pa.field('six', pa.bool_()),
@@ -611,3 +611,38 @@ with pq.ParquetWriter('simple/example_unsigned.parquet', uint_schema,
     writer.write_table(uint_rg2)
 
 print("Generated unsigned integer test data in simple/example_unsigned.parquet")
+
+# =============================================================================
+# Large string and large binary type test data
+# =============================================================================
+# Tests LARGE_STRING and LARGE_BINARY Arrow types which use 64-bit offsets.
+# These are semantically identical to STRING/BINARY but support >4GB values.
+
+large_types_schema = pa.schema([
+    pa.field('id', pa.int32()),
+    pa.field('lstr', pa.large_string()),
+    pa.field('lbin', pa.large_binary()),
+    pa.field('str', pa.string()),        # Regular string for comparison
+])
+
+# Row group 1
+large_rg1 = pa.table({
+    'id':   pa.array([1, 2, 3], type=pa.int32()),
+    'lstr': pa.array(['alpha', 'beta', 'gamma'], type=pa.large_string()),
+    'lbin': pa.array([b'\x00\x01\x02', b'\xfe\xff', b'\xde\xad\xbe\xef'], type=pa.large_binary()),
+    'str':  pa.array(['one', 'two', 'three'], type=pa.string()),
+})
+
+# Row group 2 (with NULLs)
+large_rg2 = pa.table({
+    'id':   pa.array([4, 5, 6], type=pa.int32()),
+    'lstr': pa.array([None, 'epsilon', 'zeta'], type=pa.large_string()),
+    'lbin': pa.array([b'\xca\xfe', None, b'\x00'], type=pa.large_binary()),
+    'str':  pa.array(['four', 'five', 'six'], type=pa.string()),
+})
+
+with pq.ParquetWriter('simple/example_large_types.parquet', large_types_schema) as writer:
+    writer.write_table(large_rg1)
+    writer.write_table(large_rg2)
+
+print("Generated large string/binary test data in simple/example_large_types.parquet")

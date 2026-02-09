@@ -19,10 +19,11 @@ OPTIONS (sorted 'one');
  public | example1             | foreign table | regress_parquet_fdw
  public | example2             | foreign table | regress_parquet_fdw
  public | example_dict         | foreign table | regress_parquet_fdw
+ public | example_large_types  | foreign table | regress_parquet_fdw
  public | example_time_decimal | foreign table | regress_parquet_fdw
  public | example_unsigned     | foreign table | regress_parquet_fdw
  public | example_uuid         | foreign table | regress_parquet_fdw
-(6 rows)
+(7 rows)
 
 SELECT * FROM example2;
  one |   two   | three |        four         |    five    | six 

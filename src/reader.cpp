@@ -462,11 +462,32 @@ Datum ParquetReader::read_primitive_type(arrow::Array *array,
         }
         case arrow::Type::STRING:
         case arrow::Type::BINARY:
+        case arrow::Type::LARGE_STRING:
+        case arrow::Type::LARGE_BINARY:
         {
-            auto *binarray = static_cast<arrow::BinaryArray *>(array);
+            /*
+             * The schema manifest may report STRING/BINARY while the actual
+             * array data uses LARGE_STRING/LARGE_BINARY (64-bit offsets).
+             * Check the actual array type to use the correct accessor.
+             */
+            const char *value;
+            int64 vallen;
 
-            int32_t vallen = 0;
-            const char *value = reinterpret_cast<const char*>(binarray->GetValue(i, &vallen));
+            if (array->type_id() == arrow::Type::LARGE_STRING ||
+                array->type_id() == arrow::Type::LARGE_BINARY)
+            {
+                auto *binarray = static_cast<arrow::LargeBinaryArray *>(array);
+                int64_t len64 = 0;
+                value = reinterpret_cast<const char*>(binarray->GetValue(i, &len64));
+                vallen = len64;
+            }
+            else
+            {
+                auto *binarray = static_cast<arrow::BinaryArray *>(array);
+                int32_t len32 = 0;
+                value = reinterpret_cast<const char*>(binarray->GetValue(i, &len32));
+                vallen = len32;
+            }
 
             /* Build bytea */
             int64 bytea_len = vallen + VARHDRSZ;

@@ -100,7 +100,9 @@ The following Arrow/Parquet types are mapped to PostgreSQL types:
 | DECIMAL128         | NUMERIC                          |
 | DECIMAL256         | NUMERIC                          |
 | STRING             | TEXT                             |
+| LARGE_STRING       | TEXT                             |
 | BINARY             | BYTEA                            |
+| LARGE_BINARY       | BYTEA                            |
 | LIST               | ARRAY                            |
 | MAP                | JSONB                            |
 | UUID               | UUID                             |
