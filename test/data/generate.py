@@ -649,3 +649,53 @@ with pq.ParquetWriter('simple/example_large_types.parquet', large_types_schema) 
     writer.write_table(large_rg2)
 
 print("Generated large string/binary test data in simple/example_large_types.parquet")
+
+# =============================================================================
+# STRUCT type test data
+# =============================================================================
+
+# Simple struct: {name: STRING, age: INT32}
+simple_struct_type = pa.struct([
+    pa.field('name', pa.string()),
+    pa.field('age', pa.int32()),
+])
+
+# Nested struct: {name: STRING, address: {city: STRING, zip: STRING}, scores: LIST<INT32>}
+address_type = pa.struct([
+    pa.field('city', pa.string()),
+    pa.field('zip', pa.string()),
+])
+
+nested_struct_type = pa.struct([
+    pa.field('name', pa.string()),
+    pa.field('address', address_type),
+    pa.field('scores', pa.list_(pa.int32())),
+])
+
+struct_schema = pa.schema([
+    pa.field('id', pa.int32()),
+    pa.field('simple', simple_struct_type),
+    pa.field('nested', nested_struct_type),
+])
+
+struct_table = pa.table({
+    'id': pa.array([1, 2, 3, 4], type=pa.int32()),
+    'simple': pa.array([
+        {'name': 'Alice', 'age': 30},
+        {'name': 'Bob', 'age': 25},
+        None,
+        {'name': 'Diana', 'age': 40},
+    ], type=simple_struct_type),
+    'nested': pa.array([
+        {'name': 'Alice', 'address': {'city': 'New York', 'zip': '10001'}, 'scores': [95, 87, 92]},
+        {'name': 'Bob', 'address': {'city': 'London', 'zip': 'EC1A'}, 'scores': [78, 85]},
+        {'name': 'Charlie', 'address': None, 'scores': None},
+        None,
+    ], type=nested_struct_type),
+})
+
+os.makedirs('complex', exist_ok=True)
+with pq.ParquetWriter('complex/example_struct.parquet', struct_schema) as writer:
+    writer.write_table(struct_table)
+
+print("Generated STRUCT test data in complex/example_struct.parquet")

@@ -1,0 +1,62 @@
+SET datestyle = 'ISO';
+SET client_min_messages = WARNING;
+SET log_statement TO 'none';
+CREATE EXTENSION IF NOT EXISTS parquet_fdw;
+DROP ROLE IF EXISTS regress_parquet_fdw;
+CREATE ROLE regress_parquet_fdw LOGIN SUPERUSER;
+
+SET ROLE regress_parquet_fdw;
+CREATE SERVER IF NOT EXISTS parquet_srv FOREIGN DATA WRAPPER parquet_fdw;
+CREATE USER MAPPING IF NOT EXISTS FOR regress_parquet_fdw SERVER parquet_srv;
+
+-- Create foreign table for STRUCT test data
+CREATE FOREIGN TABLE example_struct (
+    id       INT4,
+    simple   JSONB,
+    nested   JSONB)
+SERVER parquet_srv
+OPTIONS (filename '@abs_srcdir@/data/complex/example_struct.parquet');
+
+-- Basic read: all rows
+SELECT * FROM example_struct;
+
+-- JSONB field access on simple struct
+SELECT id, simple->>'name' as name, (simple->>'age')::int as age
+FROM example_struct
+WHERE simple IS NOT NULL;
+
+-- Nested struct access
+SELECT id,
+       nested->>'name' as name,
+       nested->'address'->>'city' as city,
+       nested->'address'->>'zip' as zip
+FROM example_struct
+WHERE nested IS NOT NULL;
+
+-- Access nested list inside struct (filter out JSON null vs SQL NULL)
+SELECT id, nested->'scores' as scores
+FROM example_struct
+WHERE nested IS NOT NULL AND nested->'scores' != 'null';
+
+-- NULL handling: check which rows have NULL structs
+SELECT id,
+       simple IS NULL as simple_is_null,
+       nested IS NULL as nested_is_null
+FROM example_struct;
+
+-- Filtering on JSONB content
+SELECT id FROM example_struct
+WHERE simple->>'name' = 'Alice';
+
+-- Schema import test: drop the manual table first to avoid conflict
+DROP FOREIGN TABLE example_struct;
+
+IMPORT FOREIGN SCHEMA "@abs_srcdir@/data/complex"
+FROM SERVER parquet_srv
+INTO public;
+
+\d example_struct
+
+SET client_min_messages = WARNING;
+DROP OWNED by regress_parquet_fdw;
+DROP EXTENSION parquet_fdw CASCADE;

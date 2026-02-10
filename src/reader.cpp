@@ -299,6 +299,12 @@ void ParquetReader::create_column_mapping(TupleDesc tupleDesc, const std::set<in
                         initialize_cast(typinfo, attname);
                         break;
                     }
+                    case arrow::Type::STRUCT:
+                    {
+                        setup_struct_typinfo(typinfo, schema_field, attname);
+                        initialize_cast(typinfo, attname);
+                        break;
+                    }
                     default:
                         initialize_cast(typinfo, attname);
                         typinfo.index = schema_field.column_index;
@@ -861,6 +867,375 @@ ParquetReader::map_to_datum(arrow::MapArray *maparray, int pos,
 
 
 /*
+ * push_arrow_to_jsonb
+ *      Recursive helper that pushes any Arrow value into a JsonbParseState.
+ *      Handles NULL, STRUCT, LIST/LARGE_LIST, MAP, and primitives.
+ */
+void
+ParquetReader::push_arrow_to_jsonb(arrow::Array *array, int64_t pos,
+                                    const TypeInfo &typinfo,
+                                    JsonbParseState **parseState,
+                                    bool is_elem)
+{
+    if (array->IsNull(pos))
+    {
+        JsonbValue jb;
+        jb.type = jbvNull;
+        pushJsonbValue(parseState, is_elem ? WJB_ELEM : WJB_VALUE, &jb);
+        return;
+    }
+
+    switch (typinfo.arrow.type_id)
+    {
+        case arrow::Type::STRUCT:
+        {
+            auto *sarray = static_cast<arrow::StructArray *>(array);
+            int num_fields = sarray->num_fields();
+
+            pushJsonbValue(parseState, WJB_BEGIN_OBJECT, nullptr);
+            for (int i = 0; i < num_fields; ++i)
+            {
+                /* Push field name as key */
+                JsonbValue jb;
+                auto field_name = sarray->type()->field(i)->name();
+                jb.type = jbvString;
+                jb.val.string.len = field_name.length();
+                jb.val.string.val = pstrdup(field_name.c_str());
+                pushJsonbValue(parseState, WJB_KEY, &jb);
+
+                /* Push field value recursively (after a key, values use WJB_VALUE) */
+                auto child = sarray->field(i).get();
+                push_arrow_to_jsonb(child, pos, typinfo.children[i], parseState,
+                                    false);
+            }
+            pushJsonbValue(parseState, WJB_END_OBJECT, nullptr);
+            break;
+        }
+        case arrow::Type::LIST:
+        case arrow::Type::LARGE_LIST:
+        {
+            std::shared_ptr<arrow::Array> sliced;
+            if (array->type_id() == arrow::Type::LARGE_LIST)
+            {
+                auto *larray = static_cast<arrow::LargeListArray *>(array);
+                sliced = larray->values()->Slice(larray->value_offset(pos),
+                                                 larray->value_length(pos));
+            }
+            else
+            {
+                auto *larray = static_cast<arrow::ListArray *>(array);
+                sliced = larray->values()->Slice(larray->value_offset(pos),
+                                                 larray->value_length(pos));
+            }
+
+            const TypeInfo &elem_typinfo = typinfo.children[0];
+
+            pushJsonbValue(parseState, WJB_BEGIN_ARRAY, nullptr);
+            for (int64_t i = 0; i < sliced->length(); ++i)
+            {
+                /* Array elements use WJB_ELEM */
+                push_arrow_to_jsonb(sliced.get(), i, elem_typinfo, parseState,
+                                    true);
+            }
+            pushJsonbValue(parseState, WJB_END_ARRAY, nullptr);
+            break;
+        }
+        case arrow::Type::MAP:
+        {
+            auto *maparray = static_cast<arrow::MapArray *>(array);
+            auto keys = maparray->keys()->Slice(maparray->value_offset(pos),
+                                                maparray->value_length(pos));
+            auto values = maparray->items()->Slice(maparray->value_offset(pos),
+                                                   maparray->value_length(pos));
+
+            const TypeInfo &key_typinfo = typinfo.children[0];
+            const TypeInfo &val_typinfo = typinfo.children[1];
+
+            pushJsonbValue(parseState, WJB_BEGIN_OBJECT, nullptr);
+            for (int64_t i = 0; i < keys->length(); ++i)
+            {
+                /* Key */
+                Datum key = this->read_primitive_type(keys.get(), key_typinfo, i);
+                datum_to_jsonb(key, key_typinfo.pg.oid, false, key_typinfo.outfunc,
+                               *parseState, true);
+
+                /* Value */
+                if (values->IsNull(i))
+                {
+                    JsonbValue jb;
+                    jb.type = jbvNull;
+                    pushJsonbValue(parseState, WJB_VALUE, &jb);
+                }
+                else
+                {
+                    push_arrow_to_jsonb(values.get(), i, val_typinfo, parseState,
+                                        false);
+                }
+            }
+            pushJsonbValue(parseState, WJB_END_OBJECT, nullptr);
+            break;
+        }
+        default:
+        {
+            /*
+             * Primitive type. We use datum_to_jsonb for object values
+             * (WJB_VALUE) but handle array elements (WJB_ELEM) inline,
+             * since datum_to_jsonb always pushes WJB_VALUE.
+             */
+            Datum value = this->read_primitive_type(array, typinfo, pos);
+
+            if (!is_elem)
+            {
+                datum_to_jsonb(value, typinfo.pg.oid, false, typinfo.outfunc,
+                               *parseState, false);
+            }
+            else
+            {
+                JsonbValue jb;
+                char *strval;
+
+                switch (typinfo.pg.oid)
+                {
+                    case BOOLOID:
+                        jb.type = jbvBool;
+                        jb.val.boolean = DatumGetBool(value);
+                        break;
+                    case INT2OID:
+                    case INT4OID:
+                    {
+                        Datum numeric = DirectFunctionCall1(int4_numeric, value);
+                        jb.type = jbvNumeric;
+                        jb.val.numeric = DatumGetNumeric(numeric);
+                        break;
+                    }
+                    case INT8OID:
+                    {
+                        Datum numeric = DirectFunctionCall1(int8_numeric, value);
+                        jb.type = jbvNumeric;
+                        jb.val.numeric = DatumGetNumeric(numeric);
+                        break;
+                    }
+                    case FLOAT4OID:
+                    {
+                        Datum numeric = DirectFunctionCall1(float4_numeric, value);
+                        jb.type = jbvNumeric;
+                        jb.val.numeric = DatumGetNumeric(numeric);
+                        break;
+                    }
+                    case FLOAT8OID:
+                    {
+                        Datum numeric = DirectFunctionCall1(float8_numeric, value);
+                        jb.type = jbvNumeric;
+                        jb.val.numeric = DatumGetNumeric(numeric);
+                        break;
+                    }
+                    case NUMERICOID:
+                        jb.type = jbvNumeric;
+                        jb.val.numeric = DatumGetNumeric(value);
+                        break;
+                    case TEXTOID:
+                    {
+                        char *str = TextDatumGetCString(value);
+                        jb.type = jbvString;
+                        jb.val.string.len = strlen(str);
+                        jb.val.string.val = str;
+                        break;
+                    }
+                    default:
+                        strval = DatumGetCString(FunctionCall1(typinfo.outfunc,
+                                                                value));
+                        jb.type = jbvString;
+                        jb.val.string.len = strlen(strval);
+                        jb.val.string.val = strval;
+                        break;
+                }
+                pushJsonbValue(parseState, WJB_ELEM, &jb);
+            }
+            break;
+        }
+    }
+}
+
+/*
+ * struct_to_datum
+ *      Convert an Arrow STRUCT array element to a JSONB datum.
+ */
+Datum
+ParquetReader::struct_to_datum(arrow::StructArray *sarray, int pos,
+                                const TypeInfo &typinfo)
+{
+    JsonbParseState *parseState = nullptr;
+    JsonbValue *jb;
+    Datum       res;
+    int         num_fields = sarray->num_fields();
+
+    jb = pushJsonbValue(&parseState, WJB_BEGIN_OBJECT, nullptr);
+
+    for (int i = 0; i < num_fields; ++i)
+    {
+        /* Push field name as key */
+        JsonbValue key;
+        auto field_name = sarray->type()->field(i)->name();
+        key.type = jbvString;
+        key.val.string.len = field_name.length();
+        key.val.string.val = pstrdup(field_name.c_str());
+        pushJsonbValue(&parseState, WJB_KEY, &key);
+
+        /* Push field value */
+        auto child = sarray->field(i).get();
+        push_arrow_to_jsonb(child, pos, typinfo.children[i], &parseState);
+    }
+
+    jb = pushJsonbValue(&parseState, WJB_END_OBJECT, nullptr);
+    res = JsonbPGetDatum(JsonbValueToJsonb(jb));
+
+    if (typinfo.need_cast)
+        res = do_cast(res, typinfo);
+
+    return res;
+}
+
+/*
+ * setup_struct_typinfo
+ *      Recursively build TypeInfo children for a STRUCT schema field
+ *      and collect leaf column indices into this->indices.
+ */
+void
+ParquetReader::setup_struct_typinfo(TypeInfo &typinfo,
+                                     const parquet::arrow::SchemaField &schema_field,
+                                     const char *attname)
+{
+    bool error = false;
+
+    for (size_t i = 0; i < schema_field.children.size(); ++i)
+    {
+        auto &child = schema_field.children[i];
+        auto child_type = child.field->type();
+
+        switch (child_type->id())
+        {
+            case arrow::Type::STRUCT:
+            {
+                typinfo.children.emplace_back(child_type, JSONBOID);
+                setup_struct_typinfo(typinfo.children.back(), child, attname);
+                break;
+            }
+            case arrow::Type::LIST:
+            case arrow::Type::LARGE_LIST:
+            {
+                typinfo.children.emplace_back(child_type);
+                TypeInfo &list_typinfo = typinfo.children.back();
+
+                Assert(child.children.size() == 1);
+                auto &elem_child = child.children[0];
+                auto elem_type = elem_child.field->type();
+
+                switch (elem_type->id())
+                {
+                    case arrow::Type::STRUCT:
+                    case arrow::Type::LIST:
+                    case arrow::Type::LARGE_LIST:
+                    case arrow::Type::MAP:
+                    {
+                        list_typinfo.children.emplace_back(elem_type,
+                            elem_type->id() == arrow::Type::STRUCT ? JSONBOID :
+                            elem_type->id() == arrow::Type::MAP ? JSONBOID : InvalidOid);
+                        /* Recursively set up children for complex element types */
+                        if (elem_type->id() == arrow::Type::STRUCT)
+                            setup_struct_typinfo(list_typinfo.children.back(),
+                                                 elem_child, attname);
+                        else
+                            /* For LIST/MAP inside LIST, just push leaf indices */
+                            for (auto &leaf : elem_child.children)
+                                this->indices.push_back(leaf.column_index);
+                        break;
+                    }
+                    default:
+                    {
+                        Oid pg_elem_type = to_postgres_type(elem_type.get());
+                        list_typinfo.children.emplace_back(elem_type, pg_elem_type);
+                        TypeInfo &elem_typinfo = list_typinfo.children.back();
+
+                        PG_TRY();
+                        {
+                            elem_typinfo.outfunc = find_outfunc(pg_elem_type);
+                        }
+                        PG_CATCH();
+                        {
+                            error = true;
+                        }
+                        PG_END_TRY();
+                        if (error)
+                            throw Error("failed to initialize output function for "
+                                        "STRUCT column '%s'", attname);
+
+                        this->indices.push_back(elem_child.column_index);
+                        break;
+                    }
+                }
+                break;
+            }
+            case arrow::Type::MAP:
+            {
+                typinfo.children.emplace_back(child_type, JSONBOID);
+                TypeInfo &map_typinfo = typinfo.children.back();
+
+                Assert(child.children.size() == 1);
+                auto &strct = child.children[0];
+                Assert(strct.children.size() == 2);
+                auto &key = strct.children[0];
+                auto &item = strct.children[1];
+                Oid pg_key_type = to_postgres_type(key.field->type().get());
+                Oid pg_item_type = to_postgres_type(item.field->type().get());
+
+                map_typinfo.children.emplace_back(key.field->type(), pg_key_type);
+                map_typinfo.children.emplace_back(item.field->type(), pg_item_type);
+
+                PG_TRY();
+                {
+                    map_typinfo.children[0].outfunc = find_outfunc(pg_key_type);
+                    map_typinfo.children[1].outfunc = find_outfunc(pg_item_type);
+                }
+                PG_CATCH();
+                {
+                    error = true;
+                }
+                PG_END_TRY();
+                if (error)
+                    throw Error("failed to initialize output function for "
+                                "STRUCT column '%s'", attname);
+
+                this->indices.push_back(key.column_index);
+                this->indices.push_back(item.column_index);
+                break;
+            }
+            default:
+            {
+                Oid pg_type = to_postgres_type(child_type.get());
+                typinfo.children.emplace_back(child_type, pg_type);
+                TypeInfo &child_typinfo = typinfo.children.back();
+
+                PG_TRY();
+                {
+                    child_typinfo.outfunc = find_outfunc(pg_type);
+                }
+                PG_CATCH();
+                {
+                    error = true;
+                }
+                PG_END_TRY();
+                if (error)
+                    throw Error("failed to initialize output function for "
+                                "STRUCT column '%s'", attname);
+
+                this->indices.push_back(child.column_index);
+                break;
+            }
+        }
+    }
+}
+
+/*
  * find_castfunc
  *      Check wether implicit cast will be required and prepare cast function
  *      call.
@@ -875,7 +1250,8 @@ void ParquetReader::initialize_cast(TypeInfo &typinfo, const char *attname)
 
     if (!OidIsValid(src_oid))
     {
-        if (typinfo.arrow.type_id == arrow::Type::MAP)
+        if (typinfo.arrow.type_id == arrow::Type::MAP ||
+            typinfo.arrow.type_id == arrow::Type::STRUCT)
             src_oid = JSONBOID;
         else
             elog(ERROR, "failed to initialize cast function for column '%s'",
@@ -1323,8 +1699,20 @@ public:
                         slot->tts_values[attr] = PointerGetDatum(jsonb_val);
                         break;
                     }
+                    case arrow::Type::STRUCT:
+                    {
+                        auto *sarray = static_cast<arrow::StructArray *>(array);
+                        Datum       jsonb = this->struct_to_datum(sarray, chunkInfo.pos, typinfo);
+
+                        void       *jsonb_val = allocator->fast_alloc(VARSIZE_ANY(jsonb));
+                        memcpy(jsonb_val, DatumGetPointer(jsonb), VARSIZE_ANY(jsonb));
+                        pfree(DatumGetPointer(jsonb));
+
+                        slot->tts_values[attr] = PointerGetDatum(jsonb_val);
+                        break;
+                    }
                     default:
-                        slot->tts_values[attr] = 
+                        slot->tts_values[attr] =
                             this->read_primitive_type(array, typinfo, chunkInfo.pos);
                 }
 
@@ -1591,6 +1979,19 @@ public:
                              */
                             void       *jsonb_val = allocator->fast_alloc(VARSIZE_ANY(jsonb));
 
+                            memcpy(jsonb_val, DatumGetPointer(jsonb), VARSIZE_ANY(jsonb));
+                            pfree(DatumGetPointer(jsonb));
+
+                            static_cast<Datum *>(data)[row] = PointerGetDatum(jsonb_val);
+
+                            break;
+                        }
+                    case arrow::Type::STRUCT:
+                        {
+                            auto *sarray = static_cast<arrow::StructArray *>(array);
+                            Datum       jsonb = this->struct_to_datum(sarray, j, typinfo);
+
+                            void       *jsonb_val = allocator->fast_alloc(VARSIZE_ANY(jsonb));
                             memcpy(jsonb_val, DatumGetPointer(jsonb), VARSIZE_ANY(jsonb));
                             pfree(DatumGetPointer(jsonb));
 

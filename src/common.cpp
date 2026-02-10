@@ -294,6 +294,18 @@ void datum_to_jsonb(Datum value, Oid typoid, bool isnull, FmgrInfo *outfunc,
 	}
     switch (typoid)
     {
+        case BOOLOID:
+        {
+            jb.type = jbvBool;
+            jb.val.boolean = DatumGetBool(value);
+            break;
+        }
+        case NUMERICOID:
+        {
+            jb.type = jbvNumeric;
+            jb.val.numeric = DatumGetNumeric(value);
+            break;
+        }
         case INT2OID:
         case INT4OID:
         case INT8OID:

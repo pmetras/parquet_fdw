@@ -2358,6 +2358,7 @@ extract_parquet_fields(const char *path) noexcept
                     break;
                 }
                 case arrow::Type::MAP:
+                case arrow::Type::STRUCT:
                     pg_type = JSONBOID;
                     break;
                 default:

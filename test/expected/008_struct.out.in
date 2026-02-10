@@ -1,0 +1,100 @@
+SET datestyle = 'ISO';
+SET client_min_messages = WARNING;
+SET log_statement TO 'none';
+CREATE EXTENSION IF NOT EXISTS parquet_fdw;
+DROP ROLE IF EXISTS regress_parquet_fdw;
+CREATE ROLE regress_parquet_fdw LOGIN SUPERUSER;
+SET ROLE regress_parquet_fdw;
+CREATE SERVER IF NOT EXISTS parquet_srv FOREIGN DATA WRAPPER parquet_fdw;
+CREATE USER MAPPING IF NOT EXISTS FOR regress_parquet_fdw SERVER parquet_srv;
+-- Create foreign table for STRUCT test data
+CREATE FOREIGN TABLE example_struct (
+    id       INT4,
+    simple   JSONB,
+    nested   JSONB)
+SERVER parquet_srv
+OPTIONS (filename '@abs_srcdir@/data/complex/example_struct.parquet');
+-- Basic read: all rows
+SELECT * FROM example_struct;
+ id |            simple            |                                           nested                                           
+----+------------------------------+--------------------------------------------------------------------------------------------
+  1 | {"age": 30, "name": "Alice"} | {"name": "Alice", "scores": [95, 87, 92], "address": {"zip": "10001", "city": "New York"}}
+  2 | {"age": 25, "name": "Bob"}   | {"name": "Bob", "scores": [78, 85], "address": {"zip": "EC1A", "city": "London"}}
+  3 |                              | {"name": "Charlie", "scores": null, "address": null}
+  4 | {"age": 40, "name": "Diana"} | 
+(4 rows)
+
+-- JSONB field access on simple struct
+SELECT id, simple->>'name' as name, (simple->>'age')::int as age
+FROM example_struct
+WHERE simple IS NOT NULL;
+ id | name  | age 
+----+-------+-----
+  1 | Alice |  30
+  2 | Bob   |  25
+  4 | Diana |  40
+(3 rows)
+
+-- Nested struct access
+SELECT id,
+       nested->>'name' as name,
+       nested->'address'->>'city' as city,
+       nested->'address'->>'zip' as zip
+FROM example_struct
+WHERE nested IS NOT NULL;
+ id |  name   |   city   |  zip  
+----+---------+----------+-------
+  1 | Alice   | New York | 10001
+  2 | Bob     | London   | EC1A
+  3 | Charlie |          | 
+(3 rows)
+
+-- Access nested list inside struct (filter out JSON null vs SQL NULL)
+SELECT id, nested->'scores' as scores
+FROM example_struct
+WHERE nested IS NOT NULL AND nested->'scores' != 'null';
+ id |    scores    
+----+--------------
+  1 | [95, 87, 92]
+  2 | [78, 85]
+(2 rows)
+
+-- NULL handling: check which rows have NULL structs
+SELECT id,
+       simple IS NULL as simple_is_null,
+       nested IS NULL as nested_is_null
+FROM example_struct;
+ id | simple_is_null | nested_is_null 
+----+----------------+----------------
+  1 | f              | f
+  2 | f              | f
+  3 | t              | f
+  4 | f              | t
+(4 rows)
+
+-- Filtering on JSONB content
+SELECT id FROM example_struct
+WHERE simple->>'name' = 'Alice';
+ id 
+----
+  1
+(1 row)
+
+-- Schema import test: drop the manual table first to avoid conflict
+DROP FOREIGN TABLE example_struct;
+IMPORT FOREIGN SCHEMA "@abs_srcdir@/data/complex"
+FROM SERVER parquet_srv
+INTO public;
+\d example_struct
+              Foreign table "public.example_struct"
+ Column |  Type   | Collation | Nullable | Default | FDW options 
+--------+---------+-----------+----------+---------+-------------
+ id     | integer |           |          |         | 
+ simple | jsonb   |           |          |         | 
+ nested | jsonb   |           |          |         | 
+Server: parquet_srv
+FDW options: (filename '@abs_srcdir@/data/complex/example_struct.parquet')
+
+SET client_min_messages = WARNING;
+DROP OWNED by regress_parquet_fdw;
+DROP EXTENSION parquet_fdw CASCADE;

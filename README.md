@@ -106,10 +106,11 @@ The following Arrow/Parquet types are mapped to PostgreSQL types:
 | LIST               | ARRAY                            |
 | LARGE_LIST         | ARRAY                            |
 | MAP                | JSONB                            |
+| STRUCT             | JSONB                            |
 | UUID               | UUID                             |
 | FIXED_SIZE_BINARY  | UUID (if 16 bytes) or BYTEA      |
 
-**Note:** Structs and nested lists are not currently supported.
+**Note:** Nested lists are not currently supported.
 
 ### Type Conversion Details
 
