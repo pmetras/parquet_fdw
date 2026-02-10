@@ -1,0 +1,92 @@
+SET datestyle = 'ISO';
+SET client_min_messages = WARNING;
+SET log_statement TO 'none';
+CREATE EXTENSION IF NOT EXISTS parquet_fdw;
+DROP ROLE IF EXISTS regress_parquet_fdw;
+CREATE ROLE regress_parquet_fdw LOGIN SUPERUSER;
+SET ROLE regress_parquet_fdw;
+CREATE SERVER IF NOT EXISTS parquet_srv FOREIGN DATA WRAPPER parquet_fdw;
+CREATE USER MAPPING IF NOT EXISTS FOR regress_parquet_fdw SERVER parquet_srv;
+-- Create foreign table for nested list test data
+CREATE FOREIGN TABLE example_nested_list (
+    id            INT4,
+    nested_list   JSONB,
+    list_struct   JSONB)
+SERVER parquet_srv
+OPTIONS (filename '@abs_srcdir@/data/complex/example_nested_list.parquet');
+-- Basic read: all rows
+SELECT * FROM example_nested_list;
+ id |          nested_list           |                           list_struct                           
+----+--------------------------------+-----------------------------------------------------------------
+  1 | [[1, 2, 3], [4, 5]]            | [{"name": "alpha", "value": 10}, {"name": "beta", "value": 20}]
+  2 | [[10], [20, 30], [40, 50, 60]] | [{"name": "gamma", "value": 30}]
+  3 |                                | [{"name": "delta", "value": null}]
+  4 | [null, [100, 200]]             | 
+(4 rows)
+
+-- JSONB array access on nested list
+SELECT id, nested_list->0 as first_inner_list
+FROM example_nested_list
+WHERE nested_list IS NOT NULL;
+ id | first_inner_list 
+----+------------------
+  1 | [1, 2, 3]
+  2 | [10]
+  4 | null
+(3 rows)
+
+-- Nested access: element within inner list
+SELECT id, nested_list->0->0 as first_elem
+FROM example_nested_list
+WHERE nested_list IS NOT NULL;
+ id | first_elem 
+----+------------
+  1 | 1
+  2 | 10
+  4 | null
+(3 rows)
+
+-- Access struct fields within list of structs
+SELECT id,
+       list_struct->0->>'name' as first_name,
+       (list_struct->0->>'value')::int as first_value
+FROM example_nested_list
+WHERE list_struct IS NOT NULL;
+ id | first_name | first_value 
+----+------------+-------------
+  1 | alpha      |          10
+  2 | gamma      |          30
+  3 | delta      |            
+(3 rows)
+
+-- NULL handling
+SELECT id,
+       nested_list IS NULL as nested_list_is_null,
+       list_struct IS NULL as list_struct_is_null
+FROM example_nested_list;
+ id | nested_list_is_null | list_struct_is_null 
+----+---------------------+---------------------
+  1 | f                   | f
+  2 | f                   | f
+  3 | t                   | f
+  4 | f                   | t
+(4 rows)
+
+-- Schema import test
+DROP FOREIGN TABLE example_nested_list;
+IMPORT FOREIGN SCHEMA "@abs_srcdir@/data/complex"
+FROM SERVER parquet_srv
+INTO public;
+\d example_nested_list
+              Foreign table "public.example_nested_list"
+   Column    |  Type   | Collation | Nullable | Default | FDW options 
+-------------+---------+-----------+----------+---------+-------------
+ id          | integer |           |          |         | 
+ nested_list | jsonb   |           |          |         | 
+ list_struct | jsonb   |           |          |         | 
+Server: parquet_srv
+FDW options: (filename '@abs_srcdir@/data/complex/example_nested_list.parquet')
+
+SET client_min_messages = WARNING;
+DROP OWNED by regress_parquet_fdw;
+DROP EXTENSION parquet_fdw CASCADE;

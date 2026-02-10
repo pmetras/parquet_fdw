@@ -305,6 +305,7 @@ protected:
     Datum nested_list_to_datum(arrow::Array *array, int pos, const TypeInfo &typinfo);
     Datum map_to_datum(arrow::MapArray *maparray, int pos, const TypeInfo &typinfo);
     Datum struct_to_datum(arrow::StructArray *sarray, int pos, const TypeInfo &typinfo);
+    Datum list_to_jsonb_datum(arrow::Array *array, int pos, const TypeInfo &typinfo);
     void push_arrow_to_jsonb(arrow::Array *array, int64_t pos,
                               const TypeInfo &typinfo,
                               JsonbParseState **parseState,
@@ -312,6 +313,9 @@ protected:
     void setup_struct_typinfo(TypeInfo &typinfo,
                               const parquet::arrow::SchemaField &schema_field,
                               const char *attname);
+    void setup_list_jsonb_typinfo(TypeInfo &typinfo,
+                                   const parquet::arrow::SchemaField &schema_field,
+                                   const char *attname);
     FmgrInfo *find_castfunc(arrow::Type::type src_type, Oid dst_type,
                             const char *attname);
     FmgrInfo *find_outfunc(Oid typoid);

@@ -2332,29 +2332,38 @@ extract_parquet_fields(const char *path) noexcept
                 case arrow::Type::LARGE_LIST:
                 {
                     arrow::DataType *subtype;
-                    Oid     pg_subtype;
-                    bool    error = false;
-
-                    if (type->num_fields() != 1)
-                        throw Error("lists of structs are not supported ('%s')", path);
 
                     subtype = get_arrow_list_elem_type(type.get());
-                    pg_subtype = to_postgres_type(subtype);
 
-                    /* This sucks I know... */
-                    PG_TRY();
+                    /* Complex element types map to JSONB */
+                    if (subtype->id() == arrow::Type::LIST ||
+                        subtype->id() == arrow::Type::LARGE_LIST ||
+                        subtype->id() == arrow::Type::STRUCT ||
+                        subtype->id() == arrow::Type::MAP)
                     {
-                        pg_type = get_array_type(pg_subtype);
+                        pg_type = JSONBOID;
                     }
-                    PG_CATCH();
+                    else
                     {
-                        error = true;
-                    }
-                    PG_END_TRY();
+                        Oid     pg_subtype;
+                        bool    error = false;
 
-                    if (error)
-                        throw Error("failed to get the type of array elements for %d",
-                                    pg_subtype);
+                        pg_subtype = to_postgres_type(subtype);
+
+                        PG_TRY();
+                        {
+                            pg_type = get_array_type(pg_subtype);
+                        }
+                        PG_CATCH();
+                        {
+                            error = true;
+                        }
+                        PG_END_TRY();
+
+                        if (error)
+                            throw Error("failed to get the type of array elements for %d",
+                                        pg_subtype);
+                    }
                     break;
                 }
                 case arrow::Type::MAP:

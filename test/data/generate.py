@@ -699,3 +699,44 @@ with pq.ParquetWriter('complex/example_struct.parquet', struct_schema) as writer
     writer.write_table(struct_table)
 
 print("Generated STRUCT test data in complex/example_struct.parquet")
+
+# =============================================================================
+# Nested LIST type test data (LIST<LIST<...>>, LIST<STRUCT<...>>)
+# =============================================================================
+
+# LIST<LIST<INT32>> - nested list of integers
+nested_list_type = pa.list_(pa.list_(pa.int32()))
+
+# LIST<STRUCT<name: STRING, value: INT32>> - list of structs
+item_struct_type = pa.struct([
+    pa.field('name', pa.string()),
+    pa.field('value', pa.int32()),
+])
+list_of_structs_type = pa.list_(item_struct_type)
+
+nested_list_schema = pa.schema([
+    pa.field('id', pa.int32()),
+    pa.field('nested_list', nested_list_type),
+    pa.field('list_struct', list_of_structs_type),
+])
+
+nested_list_table = pa.table({
+    'id': pa.array([1, 2, 3, 4], type=pa.int32()),
+    'nested_list': pa.array([
+        [[1, 2, 3], [4, 5]],
+        [[10], [20, 30], [40, 50, 60]],
+        None,
+        [None, [100, 200]],
+    ], type=nested_list_type),
+    'list_struct': pa.array([
+        [{'name': 'alpha', 'value': 10}, {'name': 'beta', 'value': 20}],
+        [{'name': 'gamma', 'value': 30}],
+        [{'name': 'delta', 'value': None}],
+        None,
+    ], type=list_of_structs_type),
+})
+
+with pq.ParquetWriter('complex/example_nested_list.parquet', nested_list_schema) as writer:
+    writer.write_table(nested_list_table)
+
+print("Generated nested LIST test data in complex/example_nested_list.parquet")

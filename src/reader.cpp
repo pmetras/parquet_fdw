@@ -214,6 +214,14 @@ void ParquetReader::create_column_mapping(TupleDesc tupleDesc, const std::set<in
                     {
                         Assert(schema_field.children.size() == 1);
 
+                        /* If target type is JSONB, use JSONB conversion for complex lists */
+                        if (typinfo.pg.oid == JSONBOID)
+                        {
+                            setup_list_jsonb_typinfo(typinfo, schema_field, attname);
+                            initialize_cast(typinfo, attname);
+                            break;
+                        }
+
                         Oid     elem_type;
                         int16   elem_len;
                         bool    elem_byval;
@@ -1096,6 +1104,51 @@ ParquetReader::struct_to_datum(arrow::StructArray *sarray, int pos,
 }
 
 /*
+ * list_to_jsonb_datum
+ *      Convert an Arrow LIST/LARGE_LIST array element to a JSONB datum.
+ *      Used when the target PostgreSQL type is JSONB (for nested/complex lists).
+ */
+Datum
+ParquetReader::list_to_jsonb_datum(arrow::Array *array, int pos,
+                                    const TypeInfo &typinfo)
+{
+    JsonbParseState *parseState = nullptr;
+    JsonbValue *jb;
+    Datum       res;
+
+    /* Slice the list element (runtime LIST vs LARGE_LIST check) */
+    std::shared_ptr<arrow::Array> sliced;
+    if (array->type_id() == arrow::Type::LARGE_LIST)
+    {
+        auto *larray = static_cast<arrow::LargeListArray *>(array);
+        sliced = larray->values()->Slice(larray->value_offset(pos),
+                                         larray->value_length(pos));
+    }
+    else
+    {
+        auto *larray = static_cast<arrow::ListArray *>(array);
+        sliced = larray->values()->Slice(larray->value_offset(pos),
+                                         larray->value_length(pos));
+    }
+
+    const TypeInfo &elem_typinfo = typinfo.children[0];
+
+    pushJsonbValue(&parseState, WJB_BEGIN_ARRAY, nullptr);
+    for (int64_t i = 0; i < sliced->length(); ++i)
+    {
+        push_arrow_to_jsonb(sliced.get(), i, elem_typinfo, &parseState, true);
+    }
+    jb = pushJsonbValue(&parseState, WJB_END_ARRAY, nullptr);
+
+    res = JsonbPGetDatum(JsonbValueToJsonb(jb));
+
+    if (typinfo.need_cast)
+        res = do_cast(res, typinfo);
+
+    return res;
+}
+
+/*
  * setup_struct_typinfo
  *      Recursively build TypeInfo children for a STRUCT schema field
  *      and collect leaf column indices into this->indices.
@@ -1236,6 +1289,96 @@ ParquetReader::setup_struct_typinfo(TypeInfo &typinfo,
 }
 
 /*
+ * setup_list_jsonb_typinfo
+ *      Build TypeInfo children for a LIST schema field mapped to JSONB.
+ *      Recursively handles complex element types (STRUCT, LIST, MAP).
+ */
+void
+ParquetReader::setup_list_jsonb_typinfo(TypeInfo &typinfo,
+                                         const parquet::arrow::SchemaField &schema_field,
+                                         const char *attname)
+{
+    bool error = false;
+
+    Assert(schema_field.children.size() == 1);
+    auto &child = schema_field.children[0];
+    auto child_type = child.field->type();
+
+    switch (child_type->id())
+    {
+        case arrow::Type::STRUCT:
+        {
+            typinfo.children.emplace_back(child_type, JSONBOID);
+            setup_struct_typinfo(typinfo.children.back(), child, attname);
+            break;
+        }
+        case arrow::Type::LIST:
+        case arrow::Type::LARGE_LIST:
+        {
+            typinfo.children.emplace_back(child_type, JSONBOID);
+            setup_list_jsonb_typinfo(typinfo.children.back(), child, attname);
+            break;
+        }
+        case arrow::Type::MAP:
+        {
+            typinfo.children.emplace_back(child_type, JSONBOID);
+            TypeInfo &map_typinfo = typinfo.children.back();
+
+            Assert(child.children.size() == 1);
+            auto &strct = child.children[0];
+            Assert(strct.children.size() == 2);
+            auto &key = strct.children[0];
+            auto &item = strct.children[1];
+            Oid pg_key_type = to_postgres_type(key.field->type().get());
+            Oid pg_item_type = to_postgres_type(item.field->type().get());
+
+            map_typinfo.children.emplace_back(key.field->type(), pg_key_type);
+            map_typinfo.children.emplace_back(item.field->type(), pg_item_type);
+
+            PG_TRY();
+            {
+                map_typinfo.children[0].outfunc = find_outfunc(pg_key_type);
+                map_typinfo.children[1].outfunc = find_outfunc(pg_item_type);
+            }
+            PG_CATCH();
+            {
+                error = true;
+            }
+            PG_END_TRY();
+            if (error)
+                throw Error("failed to initialize output function for "
+                            "LIST column '%s'", attname);
+
+            this->indices.push_back(key.column_index);
+            this->indices.push_back(item.column_index);
+            break;
+        }
+        default:
+        {
+            Oid pg_elem_type = to_postgres_type(child_type.get());
+            typinfo.children.emplace_back(child_type, pg_elem_type);
+            TypeInfo &elem_typinfo = typinfo.children.back();
+
+            PG_TRY();
+            {
+                elem_typinfo.outfunc = find_outfunc(pg_elem_type);
+            }
+            PG_CATCH();
+            {
+                error = true;
+            }
+            PG_END_TRY();
+            if (error)
+                throw Error("failed to initialize output function for "
+                            "LIST column '%s'", attname);
+
+            this->indices.push_back(child.column_index);
+            break;
+        }
+    }
+}
+
+/*
  * find_castfunc
  *      Check wether implicit cast will be required and prepare cast function
  *      call.
@@ -1251,7 +1394,10 @@ void ParquetReader::initialize_cast(TypeInfo &typinfo, const char *attname)
     if (!OidIsValid(src_oid))
     {
         if (typinfo.arrow.type_id == arrow::Type::MAP ||
-            typinfo.arrow.type_id == arrow::Type::STRUCT)
+            typinfo.arrow.type_id == arrow::Type::STRUCT ||
+            ((typinfo.arrow.type_id == arrow::Type::LIST ||
+              typinfo.arrow.type_id == arrow::Type::LARGE_LIST) &&
+             typinfo.pg.oid == JSONBOID))
             src_oid = JSONBOID;
         else
             elog(ERROR, "failed to initialize cast function for column '%s'",
@@ -1675,9 +1821,20 @@ public:
                     case arrow::Type::LIST:
                     case arrow::Type::LARGE_LIST:
                     {
-                        slot->tts_values[attr] =
-                            this->nested_list_to_datum(array, chunkInfo.pos,
-                                                       typinfo);
+                        if (typinfo.pg.oid == JSONBOID)
+                        {
+                            Datum jsonb = this->list_to_jsonb_datum(array, chunkInfo.pos, typinfo);
+                            void *jsonb_val = allocator->fast_alloc(VARSIZE_ANY(jsonb));
+                            memcpy(jsonb_val, DatumGetPointer(jsonb), VARSIZE_ANY(jsonb));
+                            pfree(DatumGetPointer(jsonb));
+                            slot->tts_values[attr] = PointerGetDatum(jsonb_val);
+                        }
+                        else
+                        {
+                            slot->tts_values[attr] =
+                                this->nested_list_to_datum(array, chunkInfo.pos,
+                                                           typinfo);
+                        }
                         break;
                     }
                     case arrow::Type::MAP:
@@ -1962,8 +2119,19 @@ public:
                     case arrow::Type::LIST:
                     case arrow::Type::LARGE_LIST:
                         {
-                            static_cast<Datum *>(data)[row] =
-                                this->nested_list_to_datum(array, j, typinfo);
+                            if (typinfo.pg.oid == JSONBOID)
+                            {
+                                Datum jsonb = this->list_to_jsonb_datum(array, j, typinfo);
+                                void *jsonb_val = allocator->fast_alloc(VARSIZE_ANY(jsonb));
+                                memcpy(jsonb_val, DatumGetPointer(jsonb), VARSIZE_ANY(jsonb));
+                                pfree(DatumGetPointer(jsonb));
+                                static_cast<Datum *>(data)[row] = PointerGetDatum(jsonb_val);
+                            }
+                            else
+                            {
+                                static_cast<Datum *>(data)[row] =
+                                    this->nested_list_to_datum(array, j, typinfo);
+                            }
                             break;
                         }
                     case arrow::Type::MAP:

@@ -1,0 +1,57 @@
+SET datestyle = 'ISO';
+SET client_min_messages = WARNING;
+SET log_statement TO 'none';
+CREATE EXTENSION IF NOT EXISTS parquet_fdw;
+DROP ROLE IF EXISTS regress_parquet_fdw;
+CREATE ROLE regress_parquet_fdw LOGIN SUPERUSER;
+
+SET ROLE regress_parquet_fdw;
+CREATE SERVER IF NOT EXISTS parquet_srv FOREIGN DATA WRAPPER parquet_fdw;
+CREATE USER MAPPING IF NOT EXISTS FOR regress_parquet_fdw SERVER parquet_srv;
+
+-- Create foreign table for nested list test data
+CREATE FOREIGN TABLE example_nested_list (
+    id            INT4,
+    nested_list   JSONB,
+    list_struct   JSONB)
+SERVER parquet_srv
+OPTIONS (filename '@abs_srcdir@/data/complex/example_nested_list.parquet');
+
+-- Basic read: all rows
+SELECT * FROM example_nested_list;
+
+-- JSONB array access on nested list
+SELECT id, nested_list->0 as first_inner_list
+FROM example_nested_list
+WHERE nested_list IS NOT NULL;
+
+-- Nested access: element within inner list
+SELECT id, nested_list->0->0 as first_elem
+FROM example_nested_list
+WHERE nested_list IS NOT NULL;
+
+-- Access struct fields within list of structs
+SELECT id,
+       list_struct->0->>'name' as first_name,
+       (list_struct->0->>'value')::int as first_value
+FROM example_nested_list
+WHERE list_struct IS NOT NULL;
+
+-- NULL handling
+SELECT id,
+       nested_list IS NULL as nested_list_is_null,
+       list_struct IS NULL as list_struct_is_null
+FROM example_nested_list;
+
+-- Schema import test
+DROP FOREIGN TABLE example_nested_list;
+
+IMPORT FOREIGN SCHEMA "@abs_srcdir@/data/complex"
+FROM SERVER parquet_srv
+INTO public;
+
+\d example_nested_list
+
+SET client_min_messages = WARNING;
+DROP OWNED by regress_parquet_fdw;
+DROP EXTENSION parquet_fdw CASCADE;

@@ -103,14 +103,14 @@ The following Arrow/Parquet types are mapped to PostgreSQL types:
 | LARGE_STRING       | TEXT                             |
 | BINARY             | BYTEA                            |
 | LARGE_BINARY       | BYTEA                            |
-| LIST               | ARRAY                            |
-| LARGE_LIST         | ARRAY                            |
+| LIST               | ARRAY (or JSONB for nested lists)|
+| LARGE_LIST         | ARRAY (or JSONB for nested lists)|
 | MAP                | JSONB                            |
 | STRUCT             | JSONB                            |
 | UUID               | UUID                             |
 | FIXED_SIZE_BINARY  | UUID (if 16 bytes) or BYTEA      |
 
-**Note:** Nested lists are not currently supported.
+**Note:** Lists of primitive types (`LIST<INT32>`, `LIST<STRING>`, etc.) map to PostgreSQL arrays. Lists with complex element types (`LIST<LIST<...>>`, `LIST<STRUCT<...>>`, `LIST<MAP<...>>`) map to JSONB.
 
 ### Type Conversion Details
 
