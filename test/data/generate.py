@@ -623,6 +623,7 @@ large_types_schema = pa.schema([
     pa.field('lstr', pa.large_string()),
     pa.field('lbin', pa.large_binary()),
     pa.field('str', pa.string()),        # Regular string for comparison
+    pa.field('llist', pa.large_list(pa.int64())),  # LARGE_LIST of int64
 ])
 
 # Row group 1
@@ -631,6 +632,7 @@ large_rg1 = pa.table({
     'lstr': pa.array(['alpha', 'beta', 'gamma'], type=pa.large_string()),
     'lbin': pa.array([b'\x00\x01\x02', b'\xfe\xff', b'\xde\xad\xbe\xef'], type=pa.large_binary()),
     'str':  pa.array(['one', 'two', 'three'], type=pa.string()),
+    'llist': pa.array([[1, 2, 3], [4, 5], [6, 7, 8, 9]], type=pa.large_list(pa.int64())),
 })
 
 # Row group 2 (with NULLs)
@@ -639,6 +641,7 @@ large_rg2 = pa.table({
     'lstr': pa.array([None, 'epsilon', 'zeta'], type=pa.large_string()),
     'lbin': pa.array([b'\xca\xfe', None, b'\x00'], type=pa.large_binary()),
     'str':  pa.array(['four', 'five', 'six'], type=pa.string()),
+    'llist': pa.array([None, [10, 11], [12]], type=pa.large_list(pa.int64())),
 })
 
 with pq.ParquetWriter('simple/example_large_types.parquet', large_types_schema) as writer:

@@ -1,4 +1,4 @@
--- Large string and large binary type tests (LARGE_STRING, LARGE_BINARY)
+-- Large type tests (LARGE_STRING, LARGE_BINARY, LARGE_LIST)
 SET datestyle = 'ISO';
 SET client_min_messages = WARNING;
 SET log_statement TO 'none';
@@ -14,12 +14,13 @@ CREATE SERVER parquet_srv FOREIGN DATA WRAPPER parquet_fdw;
 CREATE USER MAPPING FOR regress_parquet_fdw SERVER parquet_srv;
 SET ROLE regress_parquet_fdw;
 
--- Create foreign table mapping large types to TEXT/BYTEA
+-- Create foreign table mapping large types to TEXT/BYTEA/ARRAY
 CREATE FOREIGN TABLE large_types_test (
     id    INT,
     lstr  TEXT,               -- LARGE_STRING -> TEXT
     lbin  BYTEA,              -- LARGE_BINARY -> BYTEA
-    str   TEXT                -- STRING -> TEXT (for comparison)
+    str   TEXT,               -- STRING -> TEXT (for comparison)
+    llist BIGINT[]            -- LARGE_LIST -> ARRAY
 )
 SERVER parquet_srv
 OPTIONS (filename '@abs_srcdir@/data/simple/example_large_types.parquet');
@@ -39,6 +40,15 @@ SELECT id, lstr FROM large_types_test WHERE lstr LIKE '%eta' ORDER BY id;
 
 -- Test 5: Aggregates
 SELECT COUNT(*), COUNT(lstr), COUNT(lbin) FROM large_types_test;
+
+-- Test 6: Read LARGE_LIST data
+SELECT id, llist FROM large_types_test ORDER BY id;
+
+-- Test 7: LARGE_LIST NULLs
+SELECT id, llist FROM large_types_test WHERE llist IS NULL ORDER BY id;
+
+-- Test 8: LARGE_LIST with other columns
+SELECT id, lstr, llist FROM large_types_test WHERE id <= 3 ORDER BY id;
 
 -- Clean up
 DROP FOREIGN TABLE large_types_test;

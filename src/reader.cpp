@@ -210,6 +210,7 @@ void ParquetReader::create_column_mapping(TupleDesc tupleDesc, const std::set<in
                 switch (arrow_type->id())
                 {
                     case arrow::Type::LIST:
+                    case arrow::Type::LARGE_LIST:
                     {
                         Assert(schema_field.children.size() == 1);
 
@@ -712,7 +713,7 @@ Datum ParquetReader::read_primitive_type(arrow::Array *array,
  *      Returns postgres array build from elements of array. Only one
  *      dimensional arrays are supported.
  */
-Datum ParquetReader::nested_list_to_datum(arrow::ListArray *larray, int pos,
+Datum ParquetReader::nested_list_to_datum(arrow::Array *array, int pos,
                                            const TypeInfo &typinfo)
 {
     ArrayType  *res;
@@ -722,19 +723,34 @@ Datum ParquetReader::nested_list_to_datum(arrow::ListArray *larray, int pos,
     int         lbs[1];
     bool        error = false;
 
-    std::shared_ptr<arrow::Array> array =
-        larray->values()->Slice(larray->value_offset(pos),
-                                larray->value_length(pos));
+    /*
+     * The schema manifest may report LIST while the actual array data uses
+     * LARGE_LIST (64-bit offsets). Check the actual array type to use the
+     * correct accessor.
+     */
+    std::shared_ptr<arrow::Array> sliced;
+    if (array->type_id() == arrow::Type::LARGE_LIST)
+    {
+        auto *larray = static_cast<arrow::LargeListArray *>(array);
+        sliced = larray->values()->Slice(larray->value_offset(pos),
+                                         larray->value_length(pos));
+    }
+    else
+    {
+        auto *larray = static_cast<arrow::ListArray *>(array);
+        sliced = larray->values()->Slice(larray->value_offset(pos),
+                                         larray->value_length(pos));
+    }
 
     const TypeInfo &elemtypinfo = typinfo.children[0];
 
-    values = (Datum *) this->allocator->fast_alloc(sizeof(Datum) * array->length());
+    values = (Datum *) this->allocator->fast_alloc(sizeof(Datum) * sliced->length());
 
 #if SIZEOF_DATUM == 8
     /* Fill values and nulls arrays */
-    if (array->null_count() == 0 &&
-        (typinfo.arrow.type_id == arrow::Type::INT64 ||
-         typinfo.arrow.type_id == arrow::Type::UINT32))
+    if (sliced->null_count() == 0 &&
+        (elemtypinfo.arrow.type_id == arrow::Type::INT64 ||
+         elemtypinfo.arrow.type_id == arrow::Type::UINT32))
     {
         /*
          * Ok, there are no nulls, so probably we could just memcpy the
@@ -744,19 +760,19 @@ Datum ParquetReader::nested_list_to_datum(arrow::ListArray *larray, int pos,
          * 8 bytes long, which is true for most contemporary systems but this
          * will not work on some exotic or really old systems.
          */
-        copy_to_c_array<int64_t>((int64_t *) values, array.get(), elemtypinfo.pg.len);
+        copy_to_c_array<int64_t>((int64_t *) values, sliced.get(), elemtypinfo.pg.len);
         goto construct_array;
     }
 #endif
-    for (int64_t i = 0; i < array->length(); ++i)
+    for (int64_t i = 0; i < sliced->length(); ++i)
     {
-        if (!array->IsNull(i))
-            values[i] = this->read_primitive_type(array.get(), elemtypinfo, i);
+        if (!sliced->IsNull(i))
+            values[i] = this->read_primitive_type(sliced.get(), elemtypinfo, i);
         else
         {
             if (!nulls)
             {
-                Size size = sizeof(bool) * array->length();
+                Size size = sizeof(bool) * sliced->length();
 
                 nulls = (bool *) this->allocator->fast_alloc(size);
                 memset(nulls, 0, size);
@@ -771,7 +787,7 @@ construct_array:
      * to prevent any kind leaks of resources allocated by c++ in case of
      * errors.
      */
-    dims[0] = array->length();
+    dims[0] = sliced->length();
     lbs[0] = 1;
     PG_TRY();
     {
@@ -1281,11 +1297,10 @@ public:
                 switch (typinfo.arrow.type_id)
                 {
                     case arrow::Type::LIST:
+                    case arrow::Type::LARGE_LIST:
                     {
-                        auto *larray = static_cast<arrow::ListArray *>(array);
-
                         slot->tts_values[attr] =
-                            this->nested_list_to_datum(larray, chunkInfo.pos,
+                            this->nested_list_to_datum(array, chunkInfo.pos,
                                                        typinfo);
                         break;
                     }
@@ -1557,11 +1572,10 @@ public:
                         }
 
                     case arrow::Type::LIST:
+                    case arrow::Type::LARGE_LIST:
                         {
-                            auto *larray = static_cast<arrow::ListArray *>(array);
-
                             static_cast<Datum *>(data)[row] =
-                                this->nested_list_to_datum(larray, j, typinfo);
+                                this->nested_list_to_datum(array, j, typinfo);
                             break;
                         }
                     case arrow::Type::MAP:

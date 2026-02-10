@@ -104,6 +104,7 @@ The following Arrow/Parquet types are mapped to PostgreSQL types:
 | BINARY             | BYTEA                            |
 | LARGE_BINARY       | BYTEA                            |
 | LIST               | ARRAY                            |
+| LARGE_LIST         | ARRAY                            |
 | MAP                | JSONB                            |
 | UUID               | UUID                             |
 | FIXED_SIZE_BINARY  | UUID (if 16 bytes) or BYTEA      |

@@ -301,7 +301,7 @@ protected:
     Datum do_cast(Datum val, const TypeInfo &typinfo);
     Datum read_primitive_type(arrow::Array *array, const TypeInfo &typinfo,
                               int64_t i);
-    Datum nested_list_to_datum(arrow::ListArray *larray, int pos, const TypeInfo &typinfo);
+    Datum nested_list_to_datum(arrow::Array *array, int pos, const TypeInfo &typinfo);
     Datum map_to_datum(arrow::MapArray *maparray, int pos, const TypeInfo &typinfo);
     FmgrInfo *find_castfunc(arrow::Type::type src_type, Oid dst_type,
                             const char *attname);

@@ -2329,6 +2329,7 @@ extract_parquet_fields(const char *path) noexcept
             switch (type->id())
             {
                 case arrow::Type::LIST:
+                case arrow::Type::LARGE_LIST:
                 {
                     arrow::DataType *subtype;
                     Oid     pg_subtype;
